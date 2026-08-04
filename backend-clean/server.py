@@ -144,13 +144,12 @@ class Settings:
         origin.strip() 
         for origin in os.getenv("CORS_ORIGINS", "").split(",")
         if origin.strip()
-    ] or [
-        "http://localhost:3000",
-        "http://localhost:5000",
-        "https://shopbyfbo.vercel.app",
-        "https://shopverse-1-la3b.onrender.com",
-    ]
-    
+    ]] or [
+    "http://localhost:3000",
+    "https://shopbyfbo.vercel.app",        # ← doesn't match your real domain
+    "https://www.shopbyfbo.vercel.app",
+    "https://shopverse-1-la3b.onrender.com",
+]
     # Rate Limiting
     RATE_LIMIT_LOGIN: int = int(os.getenv("RATE_LIMIT_LOGIN", "5"))
     RATE_LIMIT_REGISTER: int = int(os.getenv("RATE_LIMIT_REGISTER", "3"))
