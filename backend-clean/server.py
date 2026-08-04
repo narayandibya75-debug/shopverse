@@ -1372,62 +1372,134 @@ async def auth_login_endpoint(request: Request, data: LoginRequest):
 # FIXED: GOOGLE LOGIN ENDPOINT - Handles both JSON and Form Data
 # ============================================================================
 
+# ============================================================================
+# COMPLETE WORKING GOOGLE LOGIN ENDPOINT
+# ============================================================================
+
 async def auth_google_login_endpoint(
     request: Request,
-    # Accept both JSON body and form data
 ):
-    """Google OAuth login - Fixed to handle multiple data formats."""
+    """Google OAuth login - Handles all Google credential formats."""
     await check_rate_limit(request, "login")
     
-    # Try to get data from JSON body
     try:
-        body = await request.json()
-        logger.info(f"Google login request body received")
+        # Get the raw request body
+        body = await request.body()
         
-        # Handle different possible field names from Google
-        token = body.get("id_token") or body.get("credential") or body.get("token")
-        user_email = body.get("email")
-        user_name = body.get("name") or body.get("given_name", "")
-        user_picture = body.get("picture") or body.get("imageUrl", "")
+        # Parse JSON
+        data = await request.json()
         
-    except Exception as e:
-        logger.error(f"Failed to parse request body: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid request format. Expected JSON with id_token and email."
-        )
-    
-    # Validate required fields
-    if not token:
-        logger.error("Missing token in request")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Missing id_token or credential"
-        )
-    
-    if not user_email:
-        logger.error("Missing email in request")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Missing email"
-        )
-    
-    try:
-        # Verify Google token
-        google_payload = await verify_google_token(token)
-        logger.info(f"Google payload verified for: {google_payload.get('email')}")
+        logger.info(f"Google login - Received data keys: {list(data.keys())}")
         
-        # Verify email matches
-        if google_payload.get("email") != user_email:
-            logger.error(f"Email mismatch: {google_payload.get('email')} vs {user_email}")
+        # ============================================
+        # Handle different Google credential formats
+        # ============================================
+        
+        # Format 1: Google One Tap sends { credential: "token", clientId: "..." }
+        token = data.get("credential")
+        
+        # Format 2: Custom format { id_token: "token", email: "...", name: "..." }
+        if not token:
+            token = data.get("id_token")
+        
+        # Format 3: Generic { token: "token" }
+        if not token:
+            token = data.get("token")
+        
+        # If we have a token but no email/name, decode it
+        if token and not data.get("email"):
+            try:
+                # Decode JWT without verification to get payload
+                # This is safe because we'll verify it later with Google
+                import base64
+                import json
+                
+                # Split the JWT and decode the payload (second part)
+                parts = token.split('.')
+                if len(parts) == 3:
+                    # Add padding if needed
+                    payload = parts[1]
+                    payload += '=' * (4 - len(payload) % 4)
+                    decoded = base64.urlsafe_b64decode(payload)
+                    token_data = json.loads(decoded)
+                    
+                    email = token_data.get('email')
+                    name = token_data.get('name', '')
+                    picture = token_data.get('picture', '')
+                    
+                    logger.info(f"Decoded token: email={email}, name={name}")
+                    
+                    # Use decoded values
+                    user_email = email
+                    user_name = name
+                    user_picture = picture
+                else:
+                    raise ValueError("Invalid JWT format")
+                    
+            except Exception as e:
+                logger.error(f"Failed to decode token: {e}")
+                # If we can't decode, try to use what was provided
+                user_email = data.get("email")
+                user_name = data.get("name", "")
+                user_picture = data.get("picture", "")
+        else:
+            # Use provided data
+            user_email = data.get("email")
+            user_name = data.get("name", "")
+            user_picture = data.get("picture", "")
+        
+        # Log what we found
+        logger.info(f"Google login - Token: {'Present' if token else 'Missing'}")
+        logger.info(f"Google login - Email: {user_email}")
+        logger.info(f"Google login - Name: {user_name}")
+        
+        # Validate required fields
+        if not token:
+            logger.error("Missing token in request")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Missing credential or id_token"
+            )
+        
+        if not user_email:
+            logger.error("Missing email - could not extract from token or request")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Missing email - please ensure your Google account has an email"
+            )
+        
+        # ============================================
+        # Verify the token with Google
+        # ============================================
+        
+        try:
+            # Verify with Google's servers
+            google_payload = await verify_google_token(token)
+            logger.info(f"Google verified: {google_payload.get('email')}")
+            
+            # Use the verified email (more secure)
+            verified_email = google_payload.get('email')
+            if verified_email and verified_email != user_email:
+                logger.warning(f"Email mismatch: {verified_email} vs {user_email}")
+                # Use the verified email instead
+                user_email = verified_email
+            
+        except Exception as e:
+            logger.error(f"Google verification failed: {e}")
+            # If verification fails but we have a token and email, we could still proceed
+            # But it's better to fail securely
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Email mismatch"
+                detail=f"Invalid Google token: {str(e)}"
             )
+        
+        # ============================================
+        # Create or update user
+        # ============================================
         
         email = user_email.lower()
         
-        # Find or create user
+        # Find user
         user = await db_manager.db.users.find_one({"email": email})
         
         if not user:
@@ -1436,7 +1508,7 @@ async def auth_google_login_endpoint(
             user_doc = {
                 "user_id": user_id,
                 "email": email,
-                "name": user_name,
+                "name": user_name or email.split('@')[0],
                 "picture": user_picture,
                 "role": "customer",
                 "auth_provider": "google",
@@ -1446,21 +1518,30 @@ async def auth_google_login_endpoint(
             user = user_doc
             logger.info(f"New user created via Google: {email}")
         else:
-            # Update user info
+            # Update existing user
+            update_data = {
+                "auth_provider": "google",
+                "last_login": now_iso(),
+            }
+            if user_name:
+                update_data["name"] = user_name
+            if user_picture:
+                update_data["picture"] = user_picture
+                
             await db_manager.db.users.update_one(
                 {"email": email},
-                {"$set": {
-                    "name": user_name,
-                    "picture": user_picture,
-                    "auth_provider": "google",
-                    "last_login": now_iso(),
-                }}
+                {"$set": update_data}
             )
-            user = await db_manager.db.users.find_one({"email": email})
-            user.pop("password_hash", None)
+            user = await db_manager.db.users.find_one(
+                {"email": email},
+                {"_id": 0, "password_hash": 0}
+            )
             logger.info(f"User updated via Google: {email}")
         
+        # ============================================
         # Create tokens
+        # ============================================
+        
         access_token = jwt_manager.create_access_token(
             user["user_id"], 
             user["email"], 
@@ -1470,6 +1551,7 @@ async def auth_google_login_endpoint(
         
         response = create_auth_response(user, access_token, refresh_token)
         
+        # Set cookie
         response_obj = JSONResponse(content=response)
         if Settings.SECURE_COOKIES:
             response_obj.set_cookie(
@@ -1485,6 +1567,20 @@ async def auth_google_login_endpoint(
         logger.info(f"Google login successful: {email}")
         return response_obj
         
+    except json.JSONDecodeError as e:
+        logger.error(f"Invalid JSON: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid JSON request body"
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Google login error: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Authentication failed: {str(e)}"
+        )        
     except HTTPException:
         raise
     except Exception as e:
