@@ -146,12 +146,9 @@ class Settings:
         if origin.strip()
     ] or [
         "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "http://localhost:5173",
         "http://localhost:5000",
         "https://shopbyfbo.vercel.app",
-        "https://www.shopbyfbo.vercel.app",
-        "https://shopverse-vvx1.onrender.com",
+        "https://shopverse-1-la3b.onrender.com",
     ]
     
     # Rate Limiting
