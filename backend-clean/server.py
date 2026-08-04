@@ -45,6 +45,7 @@ from pydantic import (
 )
 from pydantic.fields import FieldInfo
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
+from bson import ObjectId
 from fastapi import (
     FastAPI, 
     Request, 
@@ -93,10 +94,12 @@ class Settings:
     PORT: int = int(os.getenv("PORT", "8000"))
     
     # API
-    API_PREFIX: str = "/api"
+    # NOTE: was "/api/v1" — frontend calls /api/products, /api/auth/me, etc.
+    # directly with no version segment, so the prefix must match exactly.
+    API_PREFIX: str = os.getenv("API_PREFIX", "/api")
     API_VERSION: str = "v1"
-    RENDER_URL: str = os.getenv("RENDER_URL", "https://shopverse-vvx1.onrender.com")
-    FRONTEND_URL: str = os.getenv("FRONTEND_URL", "https://shopbyfbo.vercel.app")
+    RENDER_URL: str = os.getenv("RENDER_URL", "https://shopverse-1-la3b.onrender.com")
+    FRONTEND_URL: str = os.getenv("FRONTEND_URL", "https://shopbyfbo-repo.vercel.app")
     
     # Database
     MONGO_URL: str = os.getenv("MONGO_URL", "")
@@ -140,24 +143,24 @@ class Settings:
     RAZORPAY_KEY_SECRET: str = os.getenv("RAZORPAY_KEY_SECRET", "")
     
     # CORS
-        # Ensure BOTH of your deployment domains are added to the list:
+    # These are just the DEFAULT fallback if CORS_ORIGINS isn't set in the
+    # environment. Prefer setting CORS_ORIGINS on Render so this can change
+    # without a redeploy: CORS_ORIGINS=https://your-domain.com,https://other.com
     CORS_ORIGINS: List[str] = [
-        "https://shopbyfbo.vercel.app",          # <-- Add this back
-        "https://www.shopbyfbo.vercel.app",      # <-- Add the www sub-domain
-        "https://shopbyfbo-repo.vercel.app",     # Keep your repo variant too
-        "https://www.shopbyfbo-repo.vercel.app",
+        origin.strip() 
+        for origin in os.getenv("CORS_ORIGINS", "").split(",")
+        if origin.strip()
+    ] or [
         "http://localhost:3000",
-        "http://localhost:5173"
+        "http://127.0.0.1:3000",
+        "http://localhost:5173",
+        "http://localhost:5000",
+        "https://shopbyfbo-repo.vercel.app",
+        "https://www.shopbyfbo-repo.vercel.app",
+        "https://shopbyfbo.vercel.app",
+        "https://shopverse-1-la3b.onrender.com",
     ]
-
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=["*"],  # Allow all incoming domain names
-        allow_credentials=False, # Must be False when using wildcard origins "*"
-        allow_methods=["*"],  # Allow GET, POST, OPTIONS, etc.
-        allow_headers=["*"],  # Allow all metadata request headers
-    )
-
+    
     # Rate Limiting
     RATE_LIMIT_LOGIN: int = int(os.getenv("RATE_LIMIT_LOGIN", "5"))
     RATE_LIMIT_REGISTER: int = int(os.getenv("RATE_LIMIT_REGISTER", "3"))
@@ -2492,6 +2495,35 @@ async def lifespan(app: FastAPI):
     await db_manager.close()
     logger.info("Application shutdown complete")
 
+def _mongo_safe(value):
+    """
+    Recursively converts values that json.dumps can't handle on its own —
+    bson ObjectId and datetime — into JSON-safe equivalents.
+
+    Every hand-written endpoint in this file already excludes _id via
+    {"_id": 0} projections or rebuilds response dicts explicitly, so this
+    shouldn't ever have to do real work today. It exists as a defense-in-depth
+    backstop: a future endpoint that forgets the projection fails safely
+    (ObjectId becomes a string) instead of throwing an unhandled 500 at
+    serialization time.
+    """
+    if isinstance(value, ObjectId):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {k: _mongo_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_mongo_safe(v) for v in value]
+    return value
+
+
+class SafeJSONResponse(JSONResponse):
+    """Default response class for the app — see _mongo_safe() above."""
+    def render(self, content: Any) -> bytes:
+        return super().render(_mongo_safe(content))
+
+
 # Create FastAPI app
 app = FastAPI(
     title=Settings.APP_NAME,
@@ -2501,6 +2533,7 @@ app = FastAPI(
     redoc_url="/redoc" if Settings.DEBUG else None,
     openapi_url="/openapi.json" if Settings.DEBUG else None,
     lifespan=lifespan,
+    default_response_class=SafeJSONResponse,
 )
 
 # ============================================================================
@@ -2529,9 +2562,20 @@ app.add_middleware(
 # CORS — added LAST so it's the OUTERMOST middleware and can attach
 # Access-Control-Allow-Origin headers to every response, including 400s
 # from TrustedHostMiddleware and 500s from anything else in the stack.
+#
+# NOTE: allow_origins=["*"] cannot be combined with allow_credentials=True.
+# The frontend sends axios requests with withCredentials: true (needed for
+# the refresh_token cookie), and browsers reject wildcard-origin responses
+# whenever the request was made with credentials — the request would still
+# reach this server and succeed, but the browser blocks the JS from ever
+# reading the response, which looks identical to a CORS failure. So origins
+# must be an explicit list (or a regex) instead of "*".
 app.add_middleware(
     CORSMiddleware,
     allow_origins=Settings.CORS_ORIGINS,
+    # Covers every Vercel preview deployment (e.g. shopbyfbo-repo-git-*.vercel.app)
+    # without needing to add each preview URL to CORS_ORIGINS by hand.
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allow_headers=["*"],
