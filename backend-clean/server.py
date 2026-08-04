@@ -98,7 +98,7 @@ class Settings:
     API_PREFIX: str = os.getenv("API_PREFIX", "/api")
     API_VERSION: str = "v1"
     RENDER_URL: str = os.getenv("RENDER_URL", "https://shopverse-1-la3b.onrender.com")
-    FRONTEND_URL: str = os.getenv("FRONTEND_URL", "https://shopbyfbo-repo.vercel.app")
+    FRONTEND_URL: str = os.getenv("FRONTEND_URL", "https://shopbyfbo.vercel.app")
     
     # Database
     MONGO_URL: str = os.getenv("MONGO_URL", "")
