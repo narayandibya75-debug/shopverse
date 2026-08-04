@@ -140,6 +140,16 @@ class Settings:
     RAZORPAY_KEY_SECRET: str = os.getenv("RAZORPAY_KEY_SECRET", "")
     
     # CORS
+        # Ensure BOTH of your deployment domains are added to the list:
+    CORS_ORIGINS: List[str] = [
+        "https://shopbyfbo.vercel.app",          # <-- Add this back
+        "https://www.shopbyfbo.vercel.app",      # <-- Add the www sub-domain
+        "https://shopbyfbo-repo.vercel.app",     # Keep your repo variant too
+        "https://www.shopbyfbo-repo.vercel.app",
+        "http://localhost:3000",
+        "http://localhost:5173"
+    ]
+
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],  # Allow all incoming domain names
