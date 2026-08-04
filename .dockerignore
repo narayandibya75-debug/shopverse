@@ -1,0 +1,16 @@
+.git
+.gitignore
+.env.example
+*.pyc
+__pycache__
+node_modules
+*.md
+.DS_Store
+.idea
+.vscode
+venv
+env
+.venv
+*.log
+backend-clean/uploads/*
+!backend-clean/uploads/.gitkeep

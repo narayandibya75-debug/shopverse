@@ -1,0 +1,111 @@
+{
+  "theme": "light",
+  "archetype": "1 (Organic & Earthy)",
+  "emotional_tone": "Trustworthy, natural, professional, calming, and clean.",
+  "colors": {
+    "background": {
+      "default": "#FAFAFA",
+      "paper": "#FFFFFF",
+      "subtle": "#F3F4F1"
+    },
+    "primary": {
+      "DEFAULT": "#1E4E37",
+      "foreground": "#FFFFFF",
+      "hover": "#143725"
+    },
+    "secondary": {
+      "DEFAULT": "#D49F11",
+      "foreground": "#FFFFFF",
+      "hover": "#B3850D"
+    },
+    "text": {
+      "primary": "#1C1E1A",
+      "secondary": "#5C6656",
+      "muted": "#8A9981"
+    },
+    "border": {
+      "light": "#E5E7E2",
+      "default": "#D1D5CB"
+    },
+    "status": {
+      "success": "#2E7D32",
+      "error": "#D32F2F",
+      "warning": "#F57C00",
+      "info": "#0288D1"
+    }
+  },
+  "typography": {
+    "fonts": {
+      "heading": "Outfit, sans-serif",
+      "body": "DM Sans, sans-serif"
+    },
+    "scale": {
+      "h1": "text-4xl sm:text-5xl lg:text-6xl tracking-tight leading-none",
+      "h2": "text-2xl sm:text-3xl lg:text-4xl tracking-tight",
+      "h3": "text-xl sm:text-2xl tracking-tight",
+      "h4": "text-lg sm:text-xl",
+      "body": "text-base leading-relaxed",
+      "small": "text-sm text-secondary",
+      "overline": "text-xs tracking-[0.2em] uppercase font-bold"
+    }
+  },
+  "spacing_and_layout": {
+    "philosophy": "Generous Spacing Philosophy. High use of negative space to create a premium, calm shopping environment.",
+    "grid": {
+      "marketing": "grid-cols-1 md:grid-cols-8 lg:grid-cols-12 gap-8 md:gap-12",
+      "dashboard": "grid-cols-1 md:grid-cols-3 lg:grid-cols-4 gap-4 md:gap-6"
+    },
+    "containers": "Max width 7xl (1280px). Internal padding on cards p-6 or p-8."
+  },
+  "surfaces_and_effects": {
+    "header": "Crystal Glass variant: bg-white/70 backdrop-blur-xl border-b border-border/40 shadow-sm",
+    "product_cards": "Flat Solid variant: bg-white border border-border/40 hover:shadow-lg hover:-translate-y-1 transition-all duration-300 ease-in-out rounded-2xl",
+    "dashboard_cards": "Neumorphism Clay & Crisp variant: Flat bg-white, 1px border-border, soft shadow-sm rounded-xl"
+  },
+  "component_instructions": {
+    "buttons": "Rounded full or xl for primary actions. Use deep green (#1E4E37) for buy/checkout, and gold (#D49F11) for accent features or secondary.",
+    "navigation": "Sticky glass header. Mobile hamburger menu with full-screen or drawer slide-out. Logo on left, Search/Cart/Account icons on right. Desktop links centered.",
+    "forms": "Use Shadcn Form components. Inputs with soft bg (#F3F4F1) and 1px border on focus (ring-primary).",
+    "tables": "Shadcn Table for Admin FBO dashboard. Striped rows with hover states.",
+    "cart": "Side drawer (Shadcn Sheet) for quick cart view, and a dedicated /cart page.",
+    "product_gallery": "Left side large image, right side details. Bottom row thumbnail gallery. 3D/Zoom optional.",
+    "badges": "Use subtle colored backgrounds for out-of-stock (bg-red-50 text-red-700), discontinued, or featured (bg-yellow-50 text-yellow-700)."
+  },
+  "image_urls": {
+    "hero_banner": {
+      "url": "https://static.prod-images.emergentagent.com/jobs/32adaf63-4993-4a7d-927c-0942c7af3463/images/27982ccc54c303b8bcbb505cd9ad182d5e14aa6613ab1aa90db2562e5f3301f2.png",
+      "description": "Premium 16:9 lifestyle shot of aloe vera and honeycomb on white stone.",
+      "category": "hero"
+    },
+    "category_aloe": {
+      "url": "https://images.unsplash.com/photo-1765357285820-7f4f17fdcce9?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NzB8MHwxfHNlYXJjaHwyfHxhbG9lJTIwdmVyYSUyMHBsYW50JTIwbGVhdmVzfGVufDB8fHx8MTc3Njg1NzkwOHww&ixlib=rb-4.1.0&q=85",
+      "description": "Close up of vibrant green aloe vera plant leaves.",
+      "category": "product_category"
+    },
+    "category_personal_care": {
+      "url": "https://images.unsplash.com/photo-1702416062979-dc44baa952c1?crop=entropy&cs=srgb&fm=jpg&ixid=M3w4NjA1NzB8MHwxfHNlYXJjaHwxfHxhbG9lJTIwdmVyYSUyMHBsYW50JTIwbGVhdmVzfGVufDB8fHx8MTc3Njg1NzkwOHww&ixlib=rb-4.1.0&q=85",
+      "description": "Green plant with water drops.",
+      "category": "product_category"
+    },
+    "lifestyle_active": {
+      "url": "https://images.pexels.com/photos/4971081/pexels-photo-4971081.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "description": "A woman performs a high kick in a grassy field by a lake, embodying fitness and healthy living.",
+      "category": "lifestyle_banner"
+    },
+    "lifestyle_jogging": {
+      "url": "https://images.pexels.com/photos/8417426/pexels-photo-8417426.jpeg?auto=compress&cs=tinysrgb&dpr=2&h=650&w=940",
+      "description": "Elderly woman enjoying a refreshing jog in a lush green park during the day.",
+      "category": "testimonial_background"
+    }
+  },
+  "testing_attributes": "All interactive and key informational elements MUST include a data-testid attribute in kebab-case. Example: data-testid='add-to-cart-button', data-testid='checkout-form-submit'.",
+  "instructions_to_main_agent": [
+    "Build standard Fastapi backend for product catalog, auth, order management, and FBO Admin.",
+    "Frontend must use React + Tailwind CSS. Install lucide-react for icons.",
+    "Strictly follow the color palette to maintain the 'Forever Living' aloe/nature brand aesthetic without explicitly saying so.",
+    "Use pure HTML + Tailwind for marketing sections. Use customized Shadcn for forms, admin dashboard, modals, and tables.",
+    "Implement the 'Generous Spacing Philosophy' across the app layout.",
+    "Always apply hover, focus, and active states with proper color contrast on CTAs.",
+    "Ensure 'FBO Admin panel' features specific Forever logic: MRP, BV/CC values on products, mark out-of-stock/discontinued."
+  ]
+}
