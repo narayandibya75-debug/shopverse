@@ -1367,20 +1367,45 @@ async def auth_login_endpoint(request: Request, data: LoginRequest):
     logger.info(f"User logged in: {email}")
     return response_obj
 
-async def auth_google_login_endpoint(request: Request, data: GoogleLoginRequest):
-    """Google OAuth login."""
+
+async def auth_google_login_endpoint(
+    request: Request,
+    id_token: Optional[str] = Form(None),
+    email: Optional[EmailStr] = Form(None),
+    name: Optional[str] = Form(None),
+    picture: Optional[str] = Form(""),
+    data: Optional[GoogleLoginRequest] = None,  # For JSON requests
+):
     await check_rate_limit(request, "login")
     
+    # Handle both JSON and form data
+    if data:
+        token = data.id_token
+        user_email = data.email
+        user_name = data.name
+        user_picture = data.picture
+    else:
+        # Get from form data
+        token = id_token
+        user_email = email
+        user_name = name
+        user_picture = picture or ""
+    
+    if not token or not user_email:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Missing required fields"
+        )
+    
     # Verify Google token
-    google_payload = await verify_google_token(data.id_token)
+    google_payload = await verify_google_token(token)
     
     # Verify email matches
-    if google_payload.get("email") != data.email:
+    if google_payload.get("email") != user_email:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Email mismatch"
         )
-    
     email = data.email.lower()
     
     # Find or create user
@@ -1762,7 +1787,7 @@ async def upload_image_endpoint(
     admin: dict = Depends(get_current_admin_user)
 ):
     """Upload product image (admin only)."""
-    await check_rate_limit("upload")
+    await check_rate_limit(request,"upload")
     
     # Validate file
     content = await validate_uploaded_file(file)
@@ -2769,6 +2794,7 @@ auth_router.post(
     response_model=AuthResponse,
 )(auth_login_endpoint)
 
+# The route registration should already be correct, but make sure it's like this:
 auth_router.post(
     f"{Settings.API_PREFIX}/auth/google-login",
     tags=["Authentication"],
