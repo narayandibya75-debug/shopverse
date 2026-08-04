@@ -960,7 +960,7 @@ async def get_optional_user(
 # ============================================================================
 
 async def verify_google_token(id_token: str) -> Dict[str, Any]:
-    """Verify Google ID token."""
+    """Verify Google ID token with improved error handling."""
     try:
         if not Settings.GOOGLE_CLIENT_ID:
             raise HTTPException(
@@ -968,43 +968,54 @@ async def verify_google_token(id_token: str) -> Dict[str, Any]:
                 detail="Google authentication not configured"
             )
         
-        # Get Google's public keys
-        async with httpx.AsyncClient() as client:
+        # Google's OAuth2 tokeninfo endpoint (simpler and more reliable)
+        async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
-                "https://www.googleapis.com/oauth2/v3/certs"
+                "https://oauth2.googleapis.com/tokeninfo",
+                params={"id_token": id_token}
             )
+            
             if response.status_code != 200:
-                raise ValueError("Failed to fetch Google certificates")
-            certs = response.json()
+                logger.error(f"Google tokeninfo failed: {response.text}")
+                raise ValueError("Invalid Google token")
+            
+            payload = response.json()
+            
+            # Verify audience (client ID)
+            if payload.get("aud") != Settings.GOOGLE_CLIENT_ID:
+                logger.error(f"Invalid audience: {payload.get('aud')}")
+                raise ValueError("Invalid token audience")
+            
+            # Verify issuer
+            if payload.get("iss") not in ["accounts.google.com", "https://accounts.google.com"]:
+                logger.error(f"Invalid issuer: {payload.get('iss')}")
+                raise ValueError("Invalid token issuer")
+            
+            return payload
         
-        # Decode without verification to get kid
-        unverified = jwt.decode(id_token, options={"verify_signature": False})
-        kid = unverified.get('kid')
-        
-        if not kid:
-            raise ValueError("Missing kid in token")
-        
-        # Find the certificate
-        cert = None
-        for key in certs.get('keys', []):
-            if key.get('kid') == kid:
-                cert = key
-                break
-        
-        if not cert:
-            raise ValueError("Certificate not found for kid")
-        
-        # Verify token
-        payload = jwt.decode(
-            id_token,
-            cert,
-            algorithms=['RS256'],
-            audience=Settings.GOOGLE_CLIENT_ID,
-            issuer='https://accounts.google.com'
+    except httpx.TimeoutException:
+        logger.error("Google API timeout")
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="Google authentication timeout"
         )
-        
-        return payload
-        
+    except httpx.RequestError as e:
+        logger.error(f"Google API request error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Google authentication service unavailable"
+        )
+    except ValueError as e:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(e)
+        )
+    except Exception as e:
+        logger.error(f"Google verification error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid Google authentication"
+        )
     except jwt.ExpiredSignatureError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
