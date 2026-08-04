@@ -8,7 +8,8 @@ Version: 2.0.1 - Fixed CORS, Google Login, and Rate Limiting
 # ============================================================================
 # IMPORTS
 # ============================================================================
-
+import base64
+import json
 import os
 import re
 import io
