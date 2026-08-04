@@ -146,7 +146,7 @@ class Settings:
         if origin.strip()
     ] or [
     "http://localhost:3000",
-    "https://shopbyfbo.vercel.app",        # ← doesn't match your real domain
+    "https://shopbyfbo.vercel.app"        # ← doesn't match your real domain
     "https://www.shopbyfbo.vercel.app",
     "https://shopverse-1-la3b.onrender.com",
 ]]
