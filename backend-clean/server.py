@@ -140,16 +140,16 @@ class Settings:
     RAZORPAY_KEY_SECRET: str = os.getenv("RAZORPAY_KEY_SECRET", "")
     
     # CORS
-    CORS_ORIGINS: List[str] = [
+    CORS_ORIGINS: List[str] = [[
         origin.strip() 
         for origin in os.getenv("CORS_ORIGINS", "").split(",")
         if origin.strip()
-    ]] or [
+    ] or [
     "http://localhost:3000",
     "https://shopbyfbo.vercel.app",        # ← doesn't match your real domain
     "https://www.shopbyfbo.vercel.app",
     "https://shopverse-1-la3b.onrender.com",
-]
+]]
     # Rate Limiting
     RATE_LIMIT_LOGIN: int = int(os.getenv("RATE_LIMIT_LOGIN", "5"))
     RATE_LIMIT_REGISTER: int = int(os.getenv("RATE_LIMIT_REGISTER", "3"))
