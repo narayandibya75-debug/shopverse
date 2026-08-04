@@ -140,16 +140,16 @@ class Settings:
     RAZORPAY_KEY_SECRET: str = os.getenv("RAZORPAY_KEY_SECRET", "")
     
     # CORS
-    CORS_ORIGINS: List[str] = [[
-        origin.strip() 
-        for origin in os.getenv("CORS_ORIGINS", "").split(",")
-        if origin.strip()
-    ] or [
-    "http://localhost:3000",
-    "https://shopbyfbo.vercel.app"        # ← doesn't match your real domain
-    "https://www.shopbyfbo.vercel.app",
-    "https://shopverse-1-la3b.onrender.com",
-]]
+    # Locate your add_middleware block and adjust it to allow all origins temporarily.
+# This bypasses all environment string parser issues instantly.
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allow all incoming domain names
+    allow_credentials=False, # Must be False when using wildcard origins "*"
+    allow_methods=["*"],  # Allow GET, POST, OPTIONS, etc.
+    allow_headers=["*"],  # Allow all metadata request headers
+)
+
     # Rate Limiting
     RATE_LIMIT_LOGIN: int = int(os.getenv("RATE_LIMIT_LOGIN", "5"))
     RATE_LIMIT_REGISTER: int = int(os.getenv("RATE_LIMIT_REGISTER", "3"))
