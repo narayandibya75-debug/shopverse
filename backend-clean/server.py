@@ -140,15 +140,13 @@ class Settings:
     RAZORPAY_KEY_SECRET: str = os.getenv("RAZORPAY_KEY_SECRET", "")
     
     # CORS
-    # Locate your add_middleware block and adjust it to allow all origins temporarily.
-# This bypasses all environment string parser issues instantly.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Allow all incoming domain names
-    allow_credentials=False, # Must be False when using wildcard origins "*"
-    allow_methods=["*"],  # Allow GET, POST, OPTIONS, etc.
-    allow_headers=["*"],  # Allow all metadata request headers
-)
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],  # Allow all incoming domain names
+        allow_credentials=False, # Must be False when using wildcard origins "*"
+        allow_methods=["*"],  # Allow GET, POST, OPTIONS, etc.
+        allow_headers=["*"],  # Allow all metadata request headers
+    )
 
     # Rate Limiting
     RATE_LIMIT_LOGIN: int = int(os.getenv("RATE_LIMIT_LOGIN", "5"))
