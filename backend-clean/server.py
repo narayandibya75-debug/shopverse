@@ -93,7 +93,7 @@ class Settings:
     PORT: int = int(os.getenv("PORT", "8000"))
     
     # API
-    API_PREFIX: str = "/api/v1"
+    API_PREFIX: str = "/api"
     API_VERSION: str = "v1"
     RENDER_URL: str = os.getenv("RENDER_URL", "https://shopverse-vvx1.onrender.com")
     FRONTEND_URL: str = os.getenv("FRONTEND_URL", "https://shopbyfbo.vercel.app")
