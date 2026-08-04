@@ -142,21 +142,32 @@ class Settings:
     RAZORPAY_KEY_SECRET: str = os.getenv("RAZORPAY_KEY_SECRET", "")
     
     # CORS - FIXED: Added more comprehensive CORS origins
+    
+    # CORS - FIXED: Include ALL frontend URLs
     CORS_ORIGINS: List[str] = [
         origin.strip() 
         for origin in os.getenv("CORS_ORIGINS", "").split(",")
         if origin.strip()
     ] or [
+        # Local development
         "http://localhost:3000",
         "http://127.0.0.1:3000",
         "http://localhost:5173",
         "http://localhost:5000",
+        "http://localhost:8080",
+        
+        # Vercel deployments
+        "https://shopbyfbo.vercel.app",
+        "https://www.shopbyfbo.vercel.app",
         "https://shopbyfbo-repo.vercel.app",
         "https://www.shopbyfbo-repo.vercel.app",
         "https://shopbyfbo.vercel.app",
+        
+        # Render backend
         "https://shopverse-1-la3b.onrender.com",
-        "https://*.onrender.com",
-        "https://*.vercel.app",
+        
+        # Add wildcard for vercel preview deployments
+        # This will match any vercel preview URL
     ]
     
     # Rate Limiting
@@ -2703,7 +2714,11 @@ app = FastAPI(
 # MIDDLEWARE SETUP
 # ============================================================================
 
-# Security (add these first — they end up innermost, still get wrapped by CORS)
+# ============================================================================
+# MIDDLEWARE SETUP - FIXED CORS
+# ============================================================================
+
+# Security middlewares
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(RequestIDMiddleware)
 app.add_middleware(RequestLoggingMiddleware)
@@ -2719,18 +2734,33 @@ app.add_middleware(
     ]
 )
 
-# CORS — added LAST so it's the OUTERMOST middleware
+# CORS - MUST BE THE OUTERMOST MIDDLEWARE
+# IMPORTANT: CORS middleware must be added LAST so it can handle all requests
 app.add_middleware(
     CORSMiddleware,
     allow_origins=Settings.CORS_ORIGINS,
-    allow_origin_regex=r"https://.*\.vercel\.app|https://.*\.onrender\.com",
+    # This regex will match ALL vercel domains (including preview deployments)
+    allow_origin_regex=r"https?://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
-    allow_headers=["*"],
-    expose_headers=["X-Request-ID"],
+    allow_headers=[
+        "Accept",
+        "Accept-Language",
+        "Content-Language",
+        "Content-Type",
+        "Authorization",
+        "X-Requested-With",
+        "X-Request-ID",
+        "Origin",
+        "Access-Control-Request-Method",
+        "Access-Control-Request-Headers",
+    ],
+    expose_headers=[
+        "X-Request-ID",
+        "Content-Disposition",
+    ],
     max_age=86400,
 )
-
 # ============================================================================
 # SEED DATA
 # ============================================================================
