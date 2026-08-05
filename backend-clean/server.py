@@ -1301,7 +1301,7 @@ async def auth_login_endpoint(request: Request, data: LoginRequest):
 
     email = data.email.lower()
 
-    await db_manager.db.login_attempts.insert_one({
+    login_attempt = await db_manager.db.login_attempts.insert_one({
         "email": email,
         "timestamp": datetime.now(timezone.utc),
         "success": False,
@@ -1328,10 +1328,16 @@ async def auth_login_endpoint(request: Request, data: LoginRequest):
     )
     refresh_token = jwt_manager.create_refresh_token(user["user_id"])
 
+    # Update the exact login_attempts row we just inserted, by _id - not by
+    # re-matching on {email, success: False} with a sort. update_one()'s sort
+    # parameter must be a dict (e.g. {"timestamp": -1}), not a list of tuples
+    # like [("timestamp", -1)] (that shape is only valid for cursor.sort()).
+    # Passing the list-of-tuples form gets BSON-encoded as an array, which
+    # MongoDB's server rejects with "sort must be a document" -> pymongo
+    # raises OperationFailure -> uncaught 500 on every successful login.
     await db_manager.db.login_attempts.update_one(
-        {"email": email, "success": False},
-        {"$set": {"success": True, "user_id": user["user_id"]}},
-        sort=[("timestamp", -1)]
+        {"_id": login_attempt.inserted_id},
+        {"$set": {"success": True, "user_id": user["user_id"]}}
     )
 
     user.pop("password_hash", None)
