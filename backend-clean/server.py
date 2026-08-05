@@ -2,7 +2,7 @@
 """
 ShopVerse FBO E-Commerce Backend
 Production-Ready Single-File FastAPI Application
-Version: 2.0.1 - Fixed CORS, Google Login, and Rate Limiting
+Version: 2.0.2 - Fixed CORS ordering, status-param shadowing bug, Google auth hardening
 """
 
 # ============================================================================
@@ -14,7 +14,6 @@ import os
 import re
 import io
 import uuid
-import json
 import time
 import hashlib
 import asyncio
@@ -35,10 +34,10 @@ import httpx
 import magic
 from PIL import Image
 from pydantic import (
-    BaseModel, 
-    EmailStr, 
-    Field, 
-    validator, 
+    BaseModel,
+    EmailStr,
+    Field,
+    validator,
     ValidationError,
     conint,
     constr,
@@ -48,14 +47,14 @@ from pydantic.fields import FieldInfo
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from bson import ObjectId
 from fastapi import (
-    FastAPI, 
-    Request, 
-    Response, 
-    Depends, 
-    HTTPException, 
-    status,
-    UploadFile, 
-    File, 
+    FastAPI,
+    Request,
+    Response,
+    Depends,
+    HTTPException,
+    status as http_status,
+    UploadFile,
+    File,
     Form,
     Cookie,
     Header,
@@ -83,29 +82,29 @@ load_dotenv()
 
 class Settings:
     """Application settings from environment variables."""
-    
+
     # Application
     APP_NAME: str = os.getenv("APP_NAME", "ShopVerse FBO")
-    APP_VERSION: str = "2.0.1"
+    APP_VERSION: str = "2.0.2"
     DEBUG: bool = os.getenv("DEBUG", "False").lower() == "true"
     ENVIRONMENT: str = os.getenv("ENVIRONMENT", "production")
-    
+
     # Server
     HOST: str = os.getenv("HOST", "0.0.0.0")
     PORT: int = int(os.getenv("PORT", "8000"))
-    
-    # API - FIXED: Changed from /api/v1 to /api
+
+    # API
     API_PREFIX: str = os.getenv("API_PREFIX", "/api")
     API_VERSION: str = "v1"
     RENDER_URL: str = os.getenv("RENDER_URL", "https://shopverse-1-la3b.onrender.com")
     FRONTEND_URL: str = os.getenv("FRONTEND_URL", "https://shopbyfbo.vercel.app")
-    
+
     # Database
     MONGO_URL: str = os.getenv("MONGO_URL", "")
     DB_NAME: str = os.getenv("DB_NAME", "shopverse")
     MONGO_MAX_POOL_SIZE: int = int(os.getenv("MONGO_MAX_POOL_SIZE", "100"))
     MONGO_MIN_POOL_SIZE: int = int(os.getenv("MONGO_MIN_POOL_SIZE", "10"))
-    
+
     # JWT
     JWT_SECRET: str = os.getenv("JWT_SECRET", "")
     JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
@@ -113,15 +112,15 @@ class Settings:
     REFRESH_TOKEN_EXPIRE_DAYS: int = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
     JWT_ISSUER: str = os.getenv("JWT_ISSUER", "shopverse-fbo")
     JWT_AUDIENCE: str = os.getenv("JWT_AUDIENCE", "shopverse-frontend")
-    
+
     # Google OAuth
     GOOGLE_CLIENT_ID: str = os.getenv("GOOGLE_CLIENT_ID", "")
     GOOGLE_CLIENT_SECRET: str = os.getenv("GOOGLE_CLIENT_SECRET", "")
-    
+
     # Admin
     ADMIN_EMAIL: str = os.getenv("ADMIN_EMAIL", "")
     ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "")
-    
+
     # Email
     SMTP_HOST: str = os.getenv("SMTP_HOST", "smtp.gmail.com")
     SMTP_PORT: int = int(os.getenv("SMTP_PORT", "587"))
@@ -129,23 +128,21 @@ class Settings:
     SMTP_PASS: str = os.getenv("SMTP_PASS", "")
     SMTP_FROM_NAME: str = os.getenv("SMTP_FROM_NAME", "ShopVerse FBO")
     SMTP_FROM_EMAIL: str = os.getenv("SMTP_FROM_EMAIL", "")
-    
+
     # Cloudinary
     CLOUDINARY_CLOUD_NAME: str = os.getenv("CLOUDINARY_CLOUD_NAME", "")
     CLOUDINARY_API_KEY: str = os.getenv("CLOUDINARY_API_KEY", "")
     CLOUDINARY_API_SECRET: str = os.getenv("CLOUDINARY_API_SECRET", "")
-    
+
     # Payment
     MERCHANT_UPI_ID: str = os.getenv("MERCHANT_UPI_ID", "")
     MERCHANT_NAME: str = os.getenv("MERCHANT_NAME", "FBO Store")
     RAZORPAY_KEY_ID: str = os.getenv("RAZORPAY_KEY_ID", "")
     RAZORPAY_KEY_SECRET: str = os.getenv("RAZORPAY_KEY_SECRET", "")
-    
-    # CORS - FIXED: Added more comprehensive CORS origins
-    
-    # CORS - FIXED: Include ALL frontend URLs
+
+    # CORS
     CORS_ORIGINS: List[str] = [
-        origin.strip() 
+        origin.strip()
         for origin in os.getenv("CORS_ORIGINS", "").split(",")
         if origin.strip()
     ] or [
@@ -155,35 +152,31 @@ class Settings:
         "http://localhost:5173",
         "http://localhost:5000",
         "http://localhost:8080",
-        
+
         # Vercel deployments
         "https://shopbyfbo.vercel.app",
         "https://www.shopbyfbo.vercel.app",
         "https://shopbyfbo-repo.vercel.app",
         "https://www.shopbyfbo-repo.vercel.app",
-        "https://shopbyfbo.vercel.app",
-        
+
         # Render backend
         "https://shopverse-1-la3b.onrender.com",
-        
-        # Add wildcard for vercel preview deployments
-        # This will match any vercel preview URL
     ]
-    
+
     # Rate Limiting
     RATE_LIMIT_LOGIN: int = int(os.getenv("RATE_LIMIT_LOGIN", "5"))
     RATE_LIMIT_REGISTER: int = int(os.getenv("RATE_LIMIT_REGISTER", "3"))
     RATE_LIMIT_CHECKOUT: int = int(os.getenv("RATE_LIMIT_CHECKOUT", "10"))
     RATE_LIMIT_UPLOAD: int = int(os.getenv("RATE_LIMIT_UPLOAD", "20"))
-    
+
     # File Upload
     MAX_FILE_SIZE: int = int(os.getenv("MAX_FILE_SIZE", "5242880"))
     MAX_IMAGE_WIDTH: int = int(os.getenv("MAX_IMAGE_WIDTH", "4096"))
     MAX_IMAGE_HEIGHT: int = int(os.getenv("MAX_IMAGE_HEIGHT", "4096"))
-    
+
     # Security
     SECURE_COOKIES: bool = os.getenv("SECURE_COOKIES", "True").lower() == "true"
-    
+
     # Categories
     CATEGORIES: List[str] = [
         "Aloe Drinks",
@@ -193,24 +186,37 @@ class Settings:
         "Weight Management",
         "Skincare",
     ]
-    
+
     @classmethod
     def validate(cls):
         """Validate required settings."""
         required = [
-            "MONGO_URL", "DB_NAME", "JWT_SECRET", 
+            "MONGO_URL", "DB_NAME", "JWT_SECRET",
             "ADMIN_EMAIL", "ADMIN_PASSWORD"
         ]
         missing = [r for r in required if not getattr(cls, r)]
         if missing:
             raise RuntimeError(f"Missing required env vars: {', '.join(missing)}")
-        
+
         if len(cls.JWT_SECRET) < 32:
             raise RuntimeError("JWT_SECRET must be at least 32 characters")
-        
+
         if cls.DEBUG and cls.ENVIRONMENT == "production":
             raise RuntimeError("DEBUG must be False in production")
-        
+
+        # Google OAuth is optional, but if partially configured it's almost
+        # certainly a misconfiguration that will surface as a 500 at runtime
+        # (see verify_google_token). Fail fast at startup instead.
+        if bool(cls.GOOGLE_CLIENT_ID) != bool(cls.GOOGLE_CLIENT_SECRET):
+            raise RuntimeError(
+                "GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET must both be set, or both left empty"
+            )
+
+        if not cls.GOOGLE_CLIENT_ID:
+            logging.getLogger(__name__).warning(
+                "GOOGLE_CLIENT_ID is not set - /auth/google-login will always fail with 500"
+            )
+
         return True
 
 # Validate settings
@@ -231,7 +237,7 @@ if Settings.CLOUDINARY_CLOUD_NAME:
 
 class JsonFormatter(logging.Formatter):
     """JSON formatter for structured logging."""
-    
+
     def format(self, record):
         log_data = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -248,27 +254,27 @@ class JsonFormatter(logging.Formatter):
 def setup_logging():
     """Configure logging."""
     log_level = getattr(logging, os.getenv("LOG_LEVEL", "INFO").upper())
-    
+
     root_logger = logging.getLogger()
     root_logger.setLevel(log_level)
     root_logger.handlers.clear()
-    
+
     handler = logging.StreamHandler()
     handler.setLevel(log_level)
-    
+
     if os.getenv("LOG_FORMAT", "json") == "json":
         handler.setFormatter(JsonFormatter())
     else:
         handler.setFormatter(logging.Formatter(
             '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
         ))
-    
+
     root_logger.addHandler(handler)
-    
+
     # Reduce third-party logging
     for lib in ["motor", "pymongo", "httpx", "urllib3"]:
         logging.getLogger(lib).setLevel(logging.WARNING)
-    
+
     return logging.getLogger(__name__)
 
 logger = setup_logging()
@@ -279,16 +285,16 @@ logger = setup_logging()
 
 class Database:
     """Singleton database manager."""
-    
+
     _instance = None
     _client: Optional[AsyncIOMotorClient] = None
     _db: Optional[AsyncIOMotorDatabase] = None
-    
+
     def __new__(cls):
         if cls._instance is None:
             cls._instance = super().__new__(cls)
         return cls._instance
-    
+
     async def connect(self):
         """Establish database connection."""
         if self._client is None:
@@ -306,7 +312,7 @@ class Database:
             except Exception as e:
                 logger.error(f"Database connection failed: {e}")
                 raise
-    
+
     async def _create_indexes(self):
         """Create database indexes."""
         try:
@@ -314,50 +320,50 @@ class Database:
             await self._db.users.create_index("email", unique=True)
             await self._db.users.create_index("user_id", unique=True)
             await self._db.users.create_index("created_at")
-            
+
             # Products
             await self._db.products.create_index("product_id", unique=True)
             await self._db.products.create_index("category")
             await self._db.products.create_index("status")
             await self._db.products.create_index("featured")
             await self._db.products.create_index("created_at")
-            
+
             # Orders
             await self._db.orders.create_index("order_id", unique=True)
             await self._db.orders.create_index("user_id")
             await self._db.orders.create_index("status")
             await self._db.orders.create_index("created_at")
-            
+
             # Carts
             await self._db.carts.create_index("user_id", unique=True)
-            
+
             # Token blacklist
             await self._db.token_blacklist.create_index("jti", unique=True)
             await self._db.token_blacklist.create_index("expires_at", expireAfterSeconds=0)
-            
+
             # Analytics
             await self._db.analytics_visits.create_index("session_id")
             await self._db.analytics_visits.create_index("timestamp")
             await self._db.analytics_visits.create_index("page")
-            
+
             await self._db.analytics_clicks.create_index("session_id")
             await self._db.analytics_clicks.create_index("timestamp")
-            
+
             # Login attempts
             await self._db.login_attempts.create_index("email")
             await self._db.login_attempts.create_index("timestamp", expireAfterSeconds=3600)
-            
+
             logger.info("Database indexes created")
         except Exception as e:
             logger.error(f"Index creation failed: {e}")
             raise
-    
+
     @property
     def db(self) -> AsyncIOMotorDatabase:
         if self._db is None:
             raise RuntimeError("Database not connected")
         return self._db
-    
+
     async def close(self):
         if self._client:
             self._client.close()
@@ -393,16 +399,12 @@ def is_valid_uuid(uuid_str: str) -> bool:
 
 def sanitize_filename(filename: str) -> str:
     """Sanitize filename to prevent path traversal."""
-    # Remove path traversal attempts
     filename = filename.replace('../', '').replace('..\\', '')
-    # Remove any directory separators
     filename = filename.replace('/', '_').replace('\\', '_')
-    # Only allow alphanumeric, dot, dash, underscore
     filename = re.sub(r'[^a-zA-Z0-9_.-]', '_', filename)
-    # Prevent empty or dot files
     if not filename or filename.startswith('.'):
         filename = f"file_{uuid.uuid4().hex[:8]}.jpg"
-    return filename[:255]  # Limit length
+    return filename[:255]
 
 def get_client_ip(request: Request) -> str:
     """Get client IP address from request."""
@@ -421,32 +423,29 @@ def is_admin(user: dict) -> bool:
 
 class PasswordHasher:
     """Password hashing using bcrypt."""
-    
+
     @staticmethod
     def hash(password: str) -> str:
-        """Hash a password."""
         salt = bcrypt.gensalt(rounds=12)
         return bcrypt.hashpw(password.encode('utf-8'), salt).decode('utf-8')
-    
+
     @staticmethod
     def verify(password: str, hashed: str) -> bool:
-        """Verify a password."""
         return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
 
 class JWTManager:
     """JWT token management with full security claims."""
-    
+
     def __init__(self):
         self.secret = Settings.JWT_SECRET
         self.algorithm = Settings.JWT_ALGORITHM
         self.issuer = Settings.JWT_ISSUER
         self.audience = Settings.JWT_AUDIENCE
-    
+
     def create_access_token(self, user_id: str, email: str, role: str = "customer") -> str:
-        """Create an access token with all security claims."""
         jti = str(uuid.uuid4())
         now = datetime.now(timezone.utc)
-        
+
         payload = {
             "jti": jti,
             "sub": user_id,
@@ -459,14 +458,13 @@ class JWTManager:
             "iss": self.issuer,
             "aud": self.audience,
         }
-        
+
         return jwt.encode(payload, self.secret, algorithm=self.algorithm)
-    
+
     def create_refresh_token(self, user_id: str) -> str:
-        """Create a refresh token."""
         jti = str(uuid.uuid4())
         now = datetime.now(timezone.utc)
-        
+
         payload = {
             "jti": jti,
             "sub": user_id,
@@ -477,11 +475,10 @@ class JWTManager:
             "iss": self.issuer,
             "aud": self.audience,
         }
-        
+
         return jwt.encode(payload, self.secret, algorithm=self.algorithm)
-    
+
     def decode_token(self, token: str, verify_type: Optional[str] = None) -> Dict[str, Any]:
-        """Decode and validate a token."""
         try:
             payload = jwt.decode(
                 token,
@@ -491,12 +488,12 @@ class JWTManager:
                 issuer=self.issuer,
                 options={"require": ["exp", "iat", "nbf", "jti"]}
             )
-            
+
             if verify_type and payload.get("type") != verify_type:
                 raise jwt.InvalidTokenError("Invalid token type")
-            
+
             return payload
-            
+
         except jwt.ExpiredSignatureError:
             logger.warning("Token expired")
             raise HTTPException(status_code=401, detail="Token expired")
@@ -506,9 +503,8 @@ class JWTManager:
         except Exception as e:
             logger.error(f"Token decode error: {e}")
             raise HTTPException(status_code=401, detail="Invalid token")
-    
+
     async def revoke_token(self, jti: str, expires_at: int) -> bool:
-        """Revoke a token by adding to blacklist."""
         try:
             await db_manager.db.token_blacklist.insert_one({
                 "jti": jti,
@@ -519,16 +515,14 @@ class JWTManager:
         except Exception as e:
             logger.error(f"Token revocation failed: {e}")
             return False
-    
+
     async def is_token_revoked(self, jti: str) -> bool:
-        """Check if token is revoked."""
         try:
             result = await db_manager.db.token_blacklist.find_one({"jti": jti})
             return result is not None
         except Exception:
             return False
 
-# Create global instances
 password_hasher = PasswordHasher()
 jwt_manager = JWTManager()
 
@@ -538,34 +532,31 @@ jwt_manager = JWTManager()
 
 class RateLimiter:
     """In-memory rate limiter."""
-    
+
     def __init__(self, max_requests: int, window_seconds: int):
         self.max_requests = max_requests
         self.window_seconds = window_seconds
         self._requests = {}
         self._lock = asyncio.Lock()
-    
+
     async def check(self, key: str) -> bool:
-        """Check if request is allowed."""
         now = time.time()
-        
+
         async with self._lock:
             if key not in self._requests:
                 self._requests[key] = []
-            
-            # Clean old requests
+
             self._requests[key] = [
-                ts for ts in self._requests[key] 
+                ts for ts in self._requests[key]
                 if now - ts < self.window_seconds
             ]
-            
+
             if len(self._requests[key]) >= self.max_requests:
                 return False
-            
+
             self._requests[key].append(now)
             return True
 
-# Rate limiter instances
 rate_limiters = {
     "login": RateLimiter(Settings.RATE_LIMIT_LOGIN, 300),
     "register": RateLimiter(Settings.RATE_LIMIT_REGISTER, 3600),
@@ -577,27 +568,26 @@ async def check_rate_limit(request: Request, limiter_key: str) -> None:
     """Check rate limit for a request."""
     key_prefix = limiter_key
     user_id = "anonymous"
-    
-    # Try to get user_id from token
+
     token = request.headers.get("Authorization", "").replace("Bearer ", "")
     if token:
         try:
             payload = jwt.decode(token, Settings.JWT_SECRET, algorithms=[Settings.JWT_ALGORITHM])
             user_id = payload.get("sub", "anonymous")
-        except:
+        except Exception:
             pass
-    
+
     client_ip = get_client_ip(request)
     key = f"{key_prefix}:{user_id if user_id != 'anonymous' else client_ip}"
-    
+
     limiter = rate_limiters.get(limiter_key)
     if not limiter:
         return
-    
+
     if not await limiter.check(key):
         logger.warning(f"Rate limit exceeded: {key}")
         raise HTTPException(
-            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            status_code=http_status.HTTP_429_TOO_MANY_REQUESTS,
             detail="Too many requests. Please try again later."
         )
 
@@ -607,11 +597,10 @@ async def check_rate_limit(request: Request, limiter_key: str) -> None:
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     """Add security headers to all responses."""
-    
+
     async def dispatch(self, request: Request, call_next):
         response = await call_next(request)
-        
-        # Security headers
+
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
@@ -621,14 +610,12 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             "payment=(), usb=(), magnetometer=(), accelerometer=(), "
             "gyroscope=(), speaker=(), vibrate=(), fullscreen=()"
         )
-        
-        # HSTS - only in production
+
         if Settings.ENVIRONMENT == "production":
             response.headers["Strict-Transport-Security"] = (
                 "max-age=31536000; includeSubDomains; preload"
             )
-        
-        # CSP - FIXED: Added Google domains
+
         csp = (
             "default-src 'self'; "
             "img-src 'self' data: https://res.cloudinary.com https://images.unsplash.com https://*.googleusercontent.com https://*.google.com; "
@@ -639,54 +626,50 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             "frame-src 'self' https://checkout.razorpay.com https://accounts.google.com https://*.google.com;"
         )
         response.headers["Content-Security-Policy"] = csp
-        
-        # Remove COOP header that might be blocking popups
+
         if "Cross-Origin-Opener-Policy" in response.headers:
             del response.headers["Cross-Origin-Opener-Policy"]
-        
+
         return response
 
 class RequestIDMiddleware(BaseHTTPMiddleware):
     """Add request ID for tracing."""
-    
+
     async def dispatch(self, request: Request, call_next):
         request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
         request.state.request_id = request_id
-        
+
         response = await call_next(request)
         response.headers["X-Request-ID"] = request_id
-        
+
         return response
 
 class RequestLoggingMiddleware(BaseHTTPMiddleware):
     """Log all requests."""
-    
+
     async def dispatch(self, request: Request, call_next):
         start_time = time.time()
-        
-        # Log request
+
         logger.info(f"Request: {request.method} {request.url.path} from {get_client_ip(request)}")
-        
+
         response = await call_next(request)
-        
-        # Log response
+
         duration = time.time() - start_time
         logger.info(
             f"Response: {request.method} {request.url.path} "
             f"status={response.status_code} duration={duration:.3f}s"
         )
-        
+
         return response
 
 # ============================================================================
 # PYDANTIC SCHEMAS
 # ============================================================================
 
-# Auth Schemas
 class LoginRequest(BaseModel):
     email: EmailStr = Field(..., description="User email address")
     password: str = Field(..., min_length=8, description="User password")
-    
+
     @validator('password')
     def validate_password_strength(cls, v):
         if len(v) < 8:
@@ -698,7 +681,7 @@ class RegisterRequest(BaseModel):
     password: str = Field(..., min_length=12, description="User password")
     name: str = Field(..., min_length=2, max_length=100, description="Full name")
     confirm_password: str = Field(..., description="Confirm password")
-    
+
     @validator('password')
     def validate_password_strength(cls, v):
         if len(v) < 12:
@@ -712,7 +695,7 @@ class RegisterRequest(BaseModel):
         if not re.search(r'[!@#$%^&*(),.?":{}|<>]', v):
             raise ValueError('Password must contain at least one special character')
         return v
-    
+
     @validator('confirm_password')
     def validate_password_match(cls, v, values):
         if 'password' in values and v != values['password']:
@@ -728,7 +711,6 @@ class GoogleLoginRequest(BaseModel):
 class RefreshTokenRequest(BaseModel):
     refresh_token: Optional[str] = Field(None, description="Refresh token")
 
-# User Schemas
 class UserResponse(BaseModel):
     user_id: str
     email: str
@@ -745,7 +727,6 @@ class AuthResponse(BaseModel):
     refresh_token: Optional[str] = None
     user: UserResponse
 
-# Product Schemas
 class ProductBase(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
     description: str = Field(..., min_length=10, max_length=2000)
@@ -759,7 +740,7 @@ class ProductBase(BaseModel):
     images: List[str] = Field(default_factory=list, max_items=10)
     featured: bool = False
     sku: Optional[str] = Field(None, max_length=50)
-    
+
     @validator('price')
     def validate_price(cls, v, values):
         if 'mrp' in values and v > values['mrp']:
@@ -777,7 +758,6 @@ class ProductResponse(ProductBase):
     created_at: str
     updated_at: str
 
-# Cart Schemas
 class CartItem(BaseModel):
     product_id: str
     quantity: int = Field(1, gt=0)
@@ -795,7 +775,6 @@ class CartResponse(BaseModel):
     total_bv: float
     total_cc: float
 
-# Address Schemas
 class Address(BaseModel):
     full_name: str = Field(..., min_length=2, max_length=100)
     phone: str = Field(..., min_length=10, max_length=10)
@@ -804,20 +783,19 @@ class Address(BaseModel):
     city: str = Field(..., min_length=2, max_length=100)
     state: str = Field(..., min_length=2, max_length=100)
     pincode: str = Field(..., min_length=6, max_length=6)
-    
+
     @validator('phone')
     def validate_phone(cls, v):
         if not re.match(r'^[6-9]\d{9}$', v):
             raise ValueError('Invalid phone number. Must be 10 digits starting with 6-9')
         return v
-    
+
     @validator('pincode')
     def validate_pincode(cls, v):
         if not re.match(r'^[1-9][0-9]{5}$', v):
             raise ValueError('Invalid pincode')
         return v
 
-# Order Schemas
 class CheckoutRequest(BaseModel):
     address: Address
     payment_method: Literal["upi", "razorpay", "cod"] = "upi"
@@ -825,7 +803,7 @@ class CheckoutRequest(BaseModel):
 class UTRSubmitRequest(BaseModel):
     order_id: str
     utr: str = Field(..., min_length=6, max_length=32)
-    
+
     @validator('utr')
     def validate_utr(cls, v):
         if not re.match(r'^[A-Za-z0-9]{6,32}$', v):
@@ -849,7 +827,6 @@ class OrderResponse(BaseModel):
     upi_url: Optional[str] = None
     created_at: str
 
-# Analytics Schemas
 class VisitTrack(BaseModel):
     page: str = Field(..., max_length=200)
     referrer: Optional[str] = Field("", max_length=500)
@@ -869,7 +846,6 @@ class ClickTrack(BaseModel):
     page: str = Field(..., max_length=200)
     label: Optional[str] = Field("", max_length=200)
 
-# Status update schemas
 class StatusUpdate(BaseModel):
     status: str
 
@@ -889,52 +865,48 @@ async def get_current_user(
 ) -> dict:
     """Get current user from token."""
     token = None
-    
-    # Try Authorization header
+
     if credentials:
         token = credentials.credentials
-    
-    # Try cookie
+
     if not token:
         token = request.cookies.get("access_token")
-    
+
     if not token:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
+            status_code=http_status.HTTP_401_UNAUTHORIZED,
             detail="Not authenticated",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    
+
     try:
         payload = jwt_manager.decode_token(token, verify_type="access")
-        
-        # Check if revoked
+
         if await jwt_manager.is_token_revoked(payload["jti"]):
             raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
+                status_code=http_status.HTTP_401_UNAUTHORIZED,
                 detail="Token revoked"
             )
-        
-        # Get user
+
         user = await db_manager.db.users.find_one(
             {"user_id": payload["sub"]},
             {"_id": 0, "password_hash": 0}
         )
-        
+
         if not user:
             raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
+                status_code=http_status.HTTP_401_UNAUTHORIZED,
                 detail="User not found"
             )
-        
+
         return user
-        
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Authentication error: {e}")
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
+            status_code=http_status.HTTP_401_UNAUTHORIZED,
             detail="Invalid authentication"
         )
 
@@ -942,7 +914,6 @@ async def get_current_active_user(
     current_user: dict = Depends(get_current_user)
 ) -> dict:
     """Get current active user."""
-    # Add any additional checks here (e.g., account locked, email verified)
     return current_user
 
 async def get_current_admin_user(
@@ -952,7 +923,7 @@ async def get_current_admin_user(
     if not is_admin(current_user):
         logger.warning(f"Admin access denied for user: {current_user.get('user_id')}")
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
+            status_code=http_status.HTTP_403_FORBIDDEN,
             detail="Admin access required"
         )
     return current_user
@@ -971,79 +942,83 @@ async def get_optional_user(
 # GOOGLE OAUTH VERIFICATION
 # ============================================================================
 
-async def verify_google_token(id_token: str) -> Dict[str, Any]:
-    """Verify Google ID token with improved error handling."""
+async def verify_google_token(id_token_str: str) -> Dict[str, Any]:
+    """
+    Verify a Google ID token.
+
+    NOTE: this uses Google's `tokeninfo` endpoint, which is convenient but is
+    explicitly documented by Google as NOT recommended for production traffic
+    (it is rate limited and intended for debugging). For production, verify
+    the token's signature locally against Google's public JWKS using the
+    `google-auth` package instead:
+
+        from google.oauth2 import id_token as google_id_token
+        from google.auth.transport import requests as google_requests
+        payload = google_id_token.verify_oauth2_token(
+            id_token_str, google_requests.Request(), Settings.GOOGLE_CLIENT_ID
+        )
+
+    That approach does not depend on an outbound network call per login and
+    will not be silently rate-limited by Google under load.
+    """
+    if not Settings.GOOGLE_CLIENT_ID:
+        # This is the most common cause of a 500 on /auth/google-login in
+        # production: GOOGLE_CLIENT_ID was never set (or was set only on the
+        # frontend/Vercel, not on the backend/Render) as an environment
+        # variable, so every request reaches this branch and raises.
+        logger.error("GOOGLE_CLIENT_ID is not configured on the backend")
+        raise HTTPException(
+            status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Google authentication is not configured on the server"
+        )
+
     try:
-        if not Settings.GOOGLE_CLIENT_ID:
-            raise HTTPException(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="Google authentication not configured"
-            )
-        
-        # Google's OAuth2 tokeninfo endpoint (simpler and more reliable)
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.get(
                 "https://oauth2.googleapis.com/tokeninfo",
-                params={"id_token": id_token}
+                params={"id_token": id_token_str}
             )
-            
+
             if response.status_code != 200:
                 logger.error(f"Google tokeninfo failed: {response.text}")
                 raise ValueError("Invalid Google token")
-            
+
             payload = response.json()
-            
-            # Verify audience (client ID)
+
             if payload.get("aud") != Settings.GOOGLE_CLIENT_ID:
                 logger.error(f"Invalid audience: {payload.get('aud')}")
                 raise ValueError("Invalid token audience")
-            
-            # Verify issuer
+
             if payload.get("iss") not in ["accounts.google.com", "https://accounts.google.com"]:
                 logger.error(f"Invalid issuer: {payload.get('iss')}")
                 raise ValueError("Invalid token issuer")
-            
+
             return payload
-        
+
     except httpx.TimeoutException:
         logger.error("Google API timeout")
         raise HTTPException(
-            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            status_code=http_status.HTTP_504_GATEWAY_TIMEOUT,
             detail="Google authentication timeout"
         )
     except httpx.RequestError as e:
         logger.error(f"Google API request error: {e}")
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Google authentication service unavailable"
         )
     except ValueError as e:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
+            status_code=http_status.HTTP_401_UNAUTHORIZED,
             detail=str(e)
         )
-    except Exception as e:
-        logger.error(f"Google verification error: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid Google authentication"
-        )
-    except jwt.ExpiredSignatureError:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Google token expired"
-        )
-    except jwt.InvalidTokenError as e:
-        logger.warning(f"Invalid Google token: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid Google authentication"
-        )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Google verification failed: {e}")
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication failed"
+            status_code=http_status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid Google authentication"
         )
 
 # ============================================================================
@@ -1055,23 +1030,23 @@ def send_email(to_email: str, subject: str, html_content: str) -> bool:
     if not Settings.SMTP_USER or not Settings.SMTP_PASS:
         logger.warning("Email not configured")
         return False
-    
+
     try:
         msg = MIMEMultipart("alternative")
         msg["Subject"] = subject
         msg["From"] = f"{Settings.SMTP_FROM_NAME} <{Settings.SMTP_FROM_EMAIL or Settings.SMTP_USER}>"
         msg["To"] = to_email
         msg.attach(MIMEText(html_content, "html"))
-        
+
         with smtplib.SMTP(Settings.SMTP_HOST, Settings.SMTP_PORT) as server:
             server.ehlo()
             server.starttls()
             server.login(Settings.SMTP_USER, Settings.SMTP_PASS)
             server.sendmail(Settings.SMTP_USER, to_email, msg.as_string())
-        
+
         logger.info(f"Email sent to {to_email}")
         return True
-        
+
     except Exception as e:
         logger.error(f"Failed to send email: {e}")
         return False
@@ -1086,10 +1061,10 @@ def send_order_confirmation_email(to_email: str, user_name: str, order: dict) ->
             <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:center;">{item.get('quantity', 0)}</td>
             <td style="padding:8px 12px;border-bottom:1px solid #eee;text-align:right;">₹{item.get('price', 0) * item.get('quantity', 0):.2f}</td>
         </tr>"""
-    
+
     addr = order.get("address", {})
     address_str = f"{addr.get('full_name', '')}, {addr.get('line1', '')}, {addr.get('city', '')}, {addr.get('state', '')} - {addr.get('pincode', '')}"
-    
+
     html = f"""
     <html>
     <body style="font-family:Arial,sans-serif;background:#f9f9f9;margin:0;padding:0;">
@@ -1139,14 +1114,14 @@ def send_order_confirmation_email(to_email: str, user_name: str, order: dict) ->
     </body>
     </html>
     """
-    
+
     return send_email(to_email, f"Order Confirmed — {order.get('order_id', '')}", html)
 
 def send_delivery_email(to_email: str, user_name: str, order: dict) -> bool:
     """Send delivery confirmation email."""
     addr = order.get("address", {})
     address_str = f"{addr.get('full_name', '')}, {addr.get('line1', '')}, {addr.get('city', '')}, {addr.get('state', '')} - {addr.get('pincode', '')}"
-    
+
     html = f"""
     <html>
     <body style="font-family:Arial,sans-serif;background:#f9f9f9;">
@@ -1173,7 +1148,7 @@ def send_delivery_email(to_email: str, user_name: str, order: dict) -> bool:
     </body>
     </html>
     """
-    
+
     return send_email(to_email, f"Your Order {order.get('order_id', '')} Has Been Delivered!", html)
 
 # ============================================================================
@@ -1200,15 +1175,13 @@ def create_auth_response(user: dict, access_token: str, refresh_token: Optional[
 
 async def register_user(email: str, password: str, name: str) -> dict:
     """Register a new user."""
-    # Check existing user
     existing = await db_manager.db.users.find_one({"email": email})
     if existing:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=http_status.HTTP_400_BAD_REQUEST,
             detail="Registration failed"  # Generic message to prevent enumeration
         )
-    
-    # Create user
+
     user_id = generate_id("user")
     user_doc = {
         "user_id": user_id,
@@ -1219,10 +1192,10 @@ async def register_user(email: str, password: str, name: str) -> dict:
         "auth_provider": "password",
         "created_at": now_iso(),
     }
-    
+
     await db_manager.db.users.insert_one(user_doc)
     user_doc.pop("password_hash", None)
-    
+
     return user_doc
 
 # ============================================================================
@@ -1231,68 +1204,64 @@ async def register_user(email: str, password: str, name: str) -> dict:
 
 async def validate_uploaded_file(file: UploadFile) -> bytes:
     """Validate uploaded file with multiple checks."""
-    # Read file content
     content = await file.read()
-    
-    # Check size
+
     if len(content) > Settings.MAX_FILE_SIZE:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=http_status.HTTP_400_BAD_REQUEST,
             detail=f"File too large. Max {Settings.MAX_FILE_SIZE // (1024*1024)}MB"
         )
-    
+
     if len(content) == 0:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=http_status.HTTP_400_BAD_REQUEST,
             detail="Empty file"
         )
-    
-    # Verify MIME type with magic bytes
+
     mime_type = magic.from_buffer(content[:1024], mime=True)
     allowed_types = ["image/jpeg", "image/png", "image/webp", "image/gif"]
-    
+
     if mime_type not in allowed_types:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=http_status.HTTP_400_BAD_REQUEST,
             detail=f"Unsupported file type: {mime_type}. Allowed: {', '.join(allowed_types)}"
         )
-    
-    # Verify extension matches MIME type
+
     ext_map = {
         "image/jpeg": [".jpg", ".jpeg"],
         "image/png": [".png"],
         "image/webp": [".webp"],
         "image/gif": [".gif"],
     }
-    
+
     ext = os.path.splitext(file.filename)[1].lower()
     if ext not in ext_map.get(mime_type, []):
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=http_status.HTTP_400_BAD_REQUEST,
             detail="File extension does not match content type"
         )
-    
-    # Validate image dimensions
+
     try:
         img = Image.open(io.BytesIO(content))
         width, height = img.size
-        
+
         if width > Settings.MAX_IMAGE_WIDTH or height > Settings.MAX_IMAGE_HEIGHT:
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
+                status_code=http_status.HTTP_400_BAD_REQUEST,
                 detail=f"Image too large. Max {Settings.MAX_IMAGE_WIDTH}x{Settings.MAX_IMAGE_HEIGHT}"
             )
-        
-        # Verify image is not corrupted
+
         img.verify()
         img.close()
-        
-    except Exception as e:
+
+    except HTTPException:
+        raise
+    except Exception:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=http_status.HTTP_400_BAD_REQUEST,
             detail="Invalid image file"
         )
-    
+
     return content
 
 # ============================================================================
@@ -1302,17 +1271,15 @@ async def validate_uploaded_file(file: UploadFile) -> bytes:
 async def auth_register_endpoint(request: Request, data: RegisterRequest):
     """Register a new user."""
     await check_rate_limit(request, "register")
-    
+
     email = data.email.lower()
     user = await register_user(email, data.password, data.name)
-    
-    # Create tokens
+
     access_token = jwt_manager.create_access_token(user["user_id"], user["email"], user["role"])
     refresh_token = jwt_manager.create_refresh_token(user["user_id"])
-    
+
     response = create_auth_response(user, access_token, refresh_token)
-    
-    # Set refresh token cookie
+
     response_obj = JSONResponse(content=response)
     if Settings.SECURE_COOKIES:
         response_obj.set_cookie(
@@ -1324,58 +1291,52 @@ async def auth_register_endpoint(request: Request, data: RegisterRequest):
             max_age=Settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
             path=f"{Settings.API_PREFIX}/auth/refresh"
         )
-    
+
     logger.info(f"User registered: {email}")
     return response_obj
 
 async def auth_login_endpoint(request: Request, data: LoginRequest):
     """Login user."""
     await check_rate_limit(request, "login")
-    
+
     email = data.email.lower()
-    
-    # Track login attempt
+
     await db_manager.db.login_attempts.insert_one({
         "email": email,
         "timestamp": datetime.now(timezone.utc),
         "success": False,
         "ip": get_client_ip(request),
     })
-    
-    # Find user
+
     user = await db_manager.db.users.find_one({"email": email})
     if not user:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
+            status_code=http_status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password"
         )
-    
-    # Verify password
+
     if not password_hasher.verify(data.password, user.get("password_hash", "")):
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
+            status_code=http_status.HTTP_401_UNAUTHORIZED,
             detail="Invalid email or password"
         )
-    
-    # Create tokens
+
     access_token = jwt_manager.create_access_token(
-        user["user_id"], 
-        user["email"], 
+        user["user_id"],
+        user["email"],
         user.get("role", "customer")
     )
     refresh_token = jwt_manager.create_refresh_token(user["user_id"])
-    
-    # Update login attempt
+
     await db_manager.db.login_attempts.update_one(
         {"email": email, "success": False},
         {"$set": {"success": True, "user_id": user["user_id"]}},
         sort=[("timestamp", -1)]
     )
-    
+
     user.pop("password_hash", None)
     response = create_auth_response(user, access_token, refresh_token)
-    
-    # Set refresh token cookie
+
     response_obj = JSONResponse(content=response)
     if Settings.SECURE_COOKIES:
         response_obj.set_cookie(
@@ -1387,289 +1348,196 @@ async def auth_login_endpoint(request: Request, data: LoginRequest):
             max_age=Settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
             path=f"{Settings.API_PREFIX}/auth/refresh"
         )
-    
+
     logger.info(f"User logged in: {email}")
     return response_obj
 
 # ============================================================================
-# FIXED: GOOGLE LOGIN ENDPOINT - Handles both JSON and Form Data
+# GOOGLE LOGIN ENDPOINT
 # ============================================================================
 
-# ============================================================================
-# COMPLETE WORKING GOOGLE LOGIN ENDPOINT
-# ============================================================================
-
-async def auth_google_login_endpoint(
-    request: Request,
-):
-    """Google OAuth login - Handles all Google credential formats."""
+async def auth_google_login_endpoint(request: Request):
+    """
+    Google OAuth login. Accepts several credential shapes so it works with
+    both Google Identity Services One Tap (`credential`) and hand-rolled
+    clients (`id_token` / `token` + `email`/`name`/`picture`).
+    """
     await check_rate_limit(request, "login")
-    
+
     try:
-        # Get the raw request body
-        body = await request.body()
-        
-        # Parse JSON
         data = await request.json()
-        
-        logger.info(f"Google login - Received data keys: {list(data.keys())}")
-        
-        # ============================================
-        # Handle different Google credential formats
-        # ============================================
-        
-        # Format 1: Google One Tap sends { credential: "token", clientId: "..." }
-        token = data.get("credential")
-        
-        # Format 2: Custom format { id_token: "token", email: "...", name: "..." }
-        if not token:
-            token = data.get("id_token")
-        
-        # Format 3: Generic { token: "token" }
-        if not token:
-            token = data.get("token")
-        
-        # If we have a token but no email/name, decode it
-        if token and not data.get("email"):
-            try:
-                # Decode JWT without verification to get payload
-                # This is safe because we'll verify it later with Google
-                import base64
-                import json
-                
-                # Split the JWT and decode the payload (second part)
-                parts = token.split('.')
-                if len(parts) == 3:
-                    # Add padding if needed
-                    payload = parts[1]
-                    payload += '=' * (4 - len(payload) % 4)
-                    decoded = base64.urlsafe_b64decode(payload)
-                    token_data = json.loads(decoded)
-                    
-                    email = token_data.get('email')
-                    name = token_data.get('name', '')
-                    picture = token_data.get('picture', '')
-                    
-                    logger.info(f"Decoded token: email={email}, name={name}")
-                    
-                    # Use decoded values
-                    user_email = email
-                    user_name = name
-                    user_picture = picture
-                else:
-                    raise ValueError("Invalid JWT format")
-                    
-            except Exception as e:
-                logger.error(f"Failed to decode token: {e}")
-                # If we can't decode, try to use what was provided
-                user_email = data.get("email")
-                user_name = data.get("name", "")
-                user_picture = data.get("picture", "")
-        else:
-            # Use provided data
-            user_email = data.get("email")
-            user_name = data.get("name", "")
-            user_picture = data.get("picture", "")
-        
-        # Log what we found
-        logger.info(f"Google login - Token: {'Present' if token else 'Missing'}")
-        logger.info(f"Google login - Email: {user_email}")
-        logger.info(f"Google login - Name: {user_name}")
-        
-        # Validate required fields
-        if not token:
-            logger.error("Missing token in request")
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Missing credential or id_token"
-            )
-        
-        if not user_email:
-            logger.error("Missing email - could not extract from token or request")
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Missing email - please ensure your Google account has an email"
-            )
-        
-        # ============================================
-        # Verify the token with Google
-        # ============================================
-        
-        try:
-            # Verify with Google's servers
-            google_payload = await verify_google_token(token)
-            logger.info(f"Google verified: {google_payload.get('email')}")
-            
-            # Use the verified email (more secure)
-            verified_email = google_payload.get('email')
-            if verified_email and verified_email != user_email:
-                logger.warning(f"Email mismatch: {verified_email} vs {user_email}")
-                # Use the verified email instead
-                user_email = verified_email
-            
-        except Exception as e:
-            logger.error(f"Google verification failed: {e}")
-            # If verification fails but we have a token and email, we could still proceed
-            # But it's better to fail securely
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail=f"Invalid Google token: {str(e)}"
-            )
-        
-        # ============================================
-        # Create or update user
-        # ============================================
-        
-        email = user_email.lower()
-        
-        # Find user
-        user = await db_manager.db.users.find_one({"email": email})
-        
-        if not user:
-            # Create new user
-            user_id = generate_id("user")
-            user_doc = {
-                "user_id": user_id,
-                "email": email,
-                "name": user_name or email.split('@')[0],
-                "picture": user_picture,
-                "role": "customer",
-                "auth_provider": "google",
-                "created_at": now_iso(),
-            }
-            await db_manager.db.users.insert_one(user_doc)
-            user = user_doc
-            logger.info(f"New user created via Google: {email}")
-        else:
-            # Update existing user
-            update_data = {
-                "auth_provider": "google",
-                "last_login": now_iso(),
-            }
-            if user_name:
-                update_data["name"] = user_name
-            if user_picture:
-                update_data["picture"] = user_picture
-                
-            await db_manager.db.users.update_one(
-                {"email": email},
-                {"$set": update_data}
-            )
-            user = await db_manager.db.users.find_one(
-                {"email": email},
-                {"_id": 0, "password_hash": 0}
-            )
-            logger.info(f"User updated via Google: {email}")
-        
-        # ============================================
-        # Create tokens
-        # ============================================
-        
-        access_token = jwt_manager.create_access_token(
-            user["user_id"], 
-            user["email"], 
-            user.get("role", "customer")
-        )
-        refresh_token = jwt_manager.create_refresh_token(user["user_id"])
-        
-        response = create_auth_response(user, access_token, refresh_token)
-        
-        # Set cookie
-        response_obj = JSONResponse(content=response)
-        if Settings.SECURE_COOKIES:
-            response_obj.set_cookie(
-                key="refresh_token",
-                value=refresh_token,
-                httponly=True,
-                secure=True,
-                samesite="lax",
-                max_age=Settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
-                path=f"{Settings.API_PREFIX}/auth/refresh"
-            )
-        
-        logger.info(f"Google login successful: {email}")
-        return response_obj
-        
-    except json.JSONDecodeError as e:
-        logger.error(f"Invalid JSON: {e}")
+    except json.JSONDecodeError:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=http_status.HTTP_400_BAD_REQUEST,
             detail="Invalid JSON request body"
         )
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Google login error: {e}", exc_info=True)
+
+    logger.info(f"Google login - received keys: {list(data.keys())}")
+
+    # Accept credential / id_token / token, in that order of preference.
+    token = data.get("credential") or data.get("id_token") or data.get("token")
+
+    if not token:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Authentication failed: {str(e)}"
-        )        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Google login error: {e}", exc_info=True)
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Authentication failed: {str(e)}"
+            status_code=http_status.HTTP_400_BAD_REQUEST,
+            detail="Missing credential or id_token"
         )
 
+    # Try to pull email/name/picture out of the unverified JWT payload as a
+    # fallback if the client didn't send them explicitly. This is ONLY used
+    # to pre-fill fields; the token is still verified against Google below,
+    # and the verified email always takes precedence.
+    user_email = data.get("email")
+    user_name = data.get("name", "")
+    user_picture = data.get("picture", "")
+
+    if not user_email:
+        try:
+            parts = token.split('.')
+            if len(parts) != 3:
+                raise ValueError("Invalid JWT format")
+            payload_b64 = parts[1] + '=' * (-len(parts[1]) % 4)
+            token_data = json.loads(base64.urlsafe_b64decode(payload_b64))
+            user_email = token_data.get('email')
+            user_name = user_name or token_data.get('name', '')
+            user_picture = user_picture or token_data.get('picture', '')
+        except Exception as e:
+            logger.warning(f"Could not pre-decode Google token payload: {e}")
+
+    if not user_email:
+        raise HTTPException(
+            status_code=http_status.HTTP_400_BAD_REQUEST,
+            detail="Missing email - please ensure your Google account has an email"
+        )
+
+    # Verify the token with Google. This is the authoritative check; the
+    # verified email always overrides whatever the client claimed.
+    google_payload = await verify_google_token(token)
+    verified_email = google_payload.get('email')
+
+    if not verified_email:
+        raise HTTPException(
+            status_code=http_status.HTTP_401_UNAUTHORIZED,
+            detail="Google token did not include an email"
+        )
+
+    if verified_email != user_email:
+        logger.warning(f"Client-claimed email {user_email} != verified email {verified_email}")
+
+    email = verified_email.lower()
+
+    user = await db_manager.db.users.find_one({"email": email})
+
+    if not user:
+        user_id = generate_id("user")
+        user_doc = {
+            "user_id": user_id,
+            "email": email,
+            "name": user_name or email.split('@')[0],
+            "picture": user_picture,
+            "role": "customer",
+            "auth_provider": "google",
+            "created_at": now_iso(),
+        }
+        await db_manager.db.users.insert_one(user_doc)
+        user = user_doc
+        logger.info(f"New user created via Google: {email}")
+    else:
+        update_data = {
+            "auth_provider": "google",
+            "last_login": now_iso(),
+        }
+        if user_name:
+            update_data["name"] = user_name
+        if user_picture:
+            update_data["picture"] = user_picture
+
+        await db_manager.db.users.update_one(
+            {"email": email},
+            {"$set": update_data}
+        )
+        user = await db_manager.db.users.find_one(
+            {"email": email},
+            {"_id": 0, "password_hash": 0}
+        )
+        logger.info(f"User updated via Google: {email}")
+
+    access_token = jwt_manager.create_access_token(
+        user["user_id"],
+        user["email"],
+        user.get("role", "customer")
+    )
+    refresh_token = jwt_manager.create_refresh_token(user["user_id"])
+
+    response = create_auth_response(user, access_token, refresh_token)
+
+    response_obj = JSONResponse(content=response)
+    if Settings.SECURE_COOKIES:
+        response_obj.set_cookie(
+            key="refresh_token",
+            value=refresh_token,
+            httponly=True,
+            secure=True,
+            samesite="lax",
+            max_age=Settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
+            path=f"{Settings.API_PREFIX}/auth/refresh"
+        )
+
+    logger.info(f"Google login successful: {email}")
+    return response_obj
+
 # ============================================================================
-# CONTINUE WITH REST OF AUTH ENDPOINTS
+# REFRESH / LOGOUT / ME
 # ============================================================================
 
 async def auth_refresh_endpoint(request: Request):
     """Refresh access token."""
-    # Get refresh token from cookie or body
     refresh_token = request.cookies.get("refresh_token")
-    
+
     if not refresh_token:
         try:
             body = await request.json()
             refresh_token = body.get("refresh_token")
-        except:
+        except Exception:
             pass
-    
+
     if not refresh_token:
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
+            status_code=http_status.HTTP_401_UNAUTHORIZED,
             detail="Refresh token required"
         )
-    
+
     try:
         payload = jwt_manager.decode_token(refresh_token, verify_type="refresh")
-        
-        # Check if revoked
+
         if await jwt_manager.is_token_revoked(payload["jti"]):
             raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
+                status_code=http_status.HTTP_401_UNAUTHORIZED,
                 detail="Token revoked"
             )
-        
-        # Revoke old refresh token (rotation)
+
         await jwt_manager.revoke_token(payload["jti"], payload["exp"])
-        
-        # Get user
+
         user = await db_manager.db.users.find_one(
             {"user_id": payload["sub"]},
             {"_id": 0, "password_hash": 0}
         )
-        
+
         if not user:
             raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
+                status_code=http_status.HTTP_401_UNAUTHORIZED,
                 detail="User not found"
             )
-        
-        # Create new tokens
+
         access_token = jwt_manager.create_access_token(
-            user["user_id"], 
-            user["email"], 
+            user["user_id"],
+            user["email"],
             user.get("role", "customer")
         )
         new_refresh_token = jwt_manager.create_refresh_token(user["user_id"])
-        
+
         response = create_auth_response(user, access_token, new_refresh_token)
-        
+
         response_obj = JSONResponse(content=response)
         if Settings.SECURE_COOKIES:
             response_obj.set_cookie(
@@ -1681,42 +1549,40 @@ async def auth_refresh_endpoint(request: Request):
                 max_age=Settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
                 path=f"{Settings.API_PREFIX}/auth/refresh"
             )
-        
+
         return response_obj
-        
+
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Refresh error: {e}")
         raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
+            status_code=http_status.HTTP_401_UNAUTHORIZED,
             detail="Invalid refresh token"
         )
 
 async def auth_logout_endpoint(request: Request):
     """Logout user and revoke tokens."""
-    # Revoke access token
     token = request.headers.get("Authorization", "").replace("Bearer ", "")
     if token:
         try:
             payload = jwt_manager.decode_token(token)
             await jwt_manager.revoke_token(payload["jti"], payload["exp"])
-        except:
+        except Exception:
             pass
-    
-    # Revoke refresh token
+
     refresh_token = request.cookies.get("refresh_token")
     if refresh_token:
         try:
             payload = jwt_manager.decode_token(refresh_token)
             await jwt_manager.revoke_token(payload["jti"], payload["exp"])
-        except:
+        except Exception:
             pass
-    
+
     response = JSONResponse(content={"ok": True, "message": "Logged out successfully"})
     response.delete_cookie("access_token", path="/")
     response.delete_cookie("refresh_token", path=f"{Settings.API_PREFIX}/auth/refresh")
-    
+
     logger.info(f"User logged out from {get_client_ip(request)}")
     return response
 
@@ -1732,7 +1598,7 @@ async def list_products_endpoint(
     category: Optional[str] = Query(None, max_length=50),
     q: Optional[str] = Query(None, max_length=200),
     featured: Optional[bool] = None,
-    status: Optional[str] = Query(None, max_length=20),
+    status_filter: Optional[str] = Query(None, max_length=20, alias="status"),
     min_price: Optional[float] = Query(None, ge=0),
     max_price: Optional[float] = Query(None, ge=0),
     limit: int = Query(100, ge=1, le=500),
@@ -1742,31 +1608,30 @@ async def list_products_endpoint(
 ):
     """List products with filtering and pagination."""
     query = {}
-    
+
     if category:
         query["category"] = category
-    
+
     if featured is not None:
         query["featured"] = featured
-    
-    if status:
-        if status not in ["active", "out_of_stock", "discontinued"]:
+
+    if status_filter:
+        if status_filter not in ["active", "out_of_stock", "discontinued"]:
             raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
+                status_code=http_status.HTTP_400_BAD_REQUEST,
                 detail="Invalid status"
             )
-        query["status"] = status
+        query["status"] = status_filter
     else:
         query["status"] = {"$in": ["active", "out_of_stock"]}
-    
+
     if q:
-        # Sanitize search query
         sanitized_q = re.escape(q)
         query["$or"] = [
             {"name": {"$regex": sanitized_q, "$options": "i"}},
             {"description": {"$regex": sanitized_q, "$options": "i"}},
         ]
-    
+
     if min_price is not None or max_price is not None:
         price_filter = {}
         if min_price is not None:
@@ -1774,18 +1639,16 @@ async def list_products_endpoint(
         if max_price is not None:
             price_filter["$lte"] = max_price
         query["price"] = price_filter
-    
-    # Sort
+
     sort_field = sort_by or "created_at"
     sort_direction = -1 if sort_order == "desc" else 1
-    
-    # Get products
+
     cursor = db_manager.db.products.find(query, {"_id": 0})
     cursor = cursor.sort(sort_field, sort_direction).skip(skip).limit(limit)
     products = await cursor.to_list(length=limit)
-    
+
     total = await db_manager.db.products.count_documents(query)
-    
+
     return {
         "items": products,
         "total": total,
@@ -1800,13 +1663,13 @@ async def get_product_endpoint(product_id: str = PathParam(..., regex=r'^prod_[a
         {"product_id": product_id},
         {"_id": 0}
     )
-    
+
     if not product:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
+            status_code=http_status.HTTP_404_NOT_FOUND,
             detail="Product not found"
         )
-    
+
     return product
 
 async def list_categories_endpoint():
@@ -1824,17 +1687,17 @@ async def admin_create_product_endpoint(
     """Create a new product (admin only)."""
     product_id = generate_id("prod")
     now = now_iso()
-    
+
     product_doc = data.dict()
     product_doc.update({
         "product_id": product_id,
         "created_at": now,
         "updated_at": now,
     })
-    
+
     await db_manager.db.products.insert_one(product_doc)
     product_doc.pop("_id", None)
-    
+
     logger.info(f"Admin {admin['user_id']} created product: {product_id}")
     return product_doc
 
@@ -1847,28 +1710,28 @@ async def admin_update_product_endpoint(
     update_data = data.dict(exclude_unset=True)
     if not update_data:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=http_status.HTTP_400_BAD_REQUEST,
             detail="No fields to update"
         )
-    
+
     update_data["updated_at"] = now_iso()
-    
+
     result = await db_manager.db.products.update_one(
         {"product_id": product_id},
         {"$set": update_data}
     )
-    
+
     if result.matched_count == 0:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
+            status_code=http_status.HTTP_404_NOT_FOUND,
             detail="Product not found"
         )
-    
+
     product = await db_manager.db.products.find_one(
         {"product_id": product_id},
         {"_id": 0}
     )
-    
+
     logger.info(f"Admin {admin['user_id']} updated product: {product_id}")
     return product
 
@@ -1878,41 +1741,41 @@ async def admin_delete_product_endpoint(
 ):
     """Delete a product (admin only)."""
     result = await db_manager.db.products.delete_one({"product_id": product_id})
-    
+
     if result.deleted_count == 0:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
+            status_code=http_status.HTTP_404_NOT_FOUND,
             detail="Product not found"
         )
-    
+
     logger.info(f"Admin {admin['user_id']} deleted product: {product_id}")
     return {"ok": True}
 
 async def admin_update_product_status_endpoint(
     product_id: str = PathParam(..., regex=r'^prod_[a-f0-9]{12}$'),
-    status: str = Form(...),
+    new_status: str = Form(..., alias="status"),
     admin: dict = Depends(get_current_admin_user)
 ):
     """Update product status (admin only)."""
-    if status not in ["active", "out_of_stock", "discontinued"]:
+    if new_status not in ["active", "out_of_stock", "discontinued"]:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=http_status.HTTP_400_BAD_REQUEST,
             detail="Invalid status"
         )
-    
+
     result = await db_manager.db.products.update_one(
         {"product_id": product_id},
-        {"$set": {"status": status, "updated_at": now_iso()}}
+        {"$set": {"status": new_status, "updated_at": now_iso()}}
     )
-    
+
     if result.matched_count == 0:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
+            status_code=http_status.HTTP_404_NOT_FOUND,
             detail="Product not found"
         )
-    
-    logger.info(f"Admin {admin['user_id']} updated product status: {product_id} -> {status}")
-    return {"ok": True, "status": status}
+
+    logger.info(f"Admin {admin['user_id']} updated product status: {product_id} -> {new_status}")
+    return {"ok": True, "status": new_status}
 
 async def admin_list_all_products_endpoint(
     admin: dict = Depends(get_current_admin_user),
@@ -1924,7 +1787,7 @@ async def admin_list_all_products_endpoint(
     cursor = cursor.skip(skip).limit(limit)
     products = await cursor.to_list(length=limit)
     total = await db_manager.db.products.count_documents({})
-    
+
     return {
         "items": products,
         "total": total,
@@ -1937,21 +1800,18 @@ async def admin_list_all_products_endpoint(
 # ============================================================================
 
 async def upload_image_endpoint(
-    request: Request,  # FIXED: Added request parameter
+    request: Request,
     file: UploadFile = File(...),
     admin: dict = Depends(get_current_admin_user)
 ):
     """Upload product image (admin only)."""
-    await check_rate_limit(request, "upload")  # FIXED: Added request parameter
-    
-    # Validate file
+    await check_rate_limit(request, "upload")
+
     content = await validate_uploaded_file(file)
-    
-    # Sanitize filename
+
     safe_filename = sanitize_filename(file.filename)
     unique_filename = f"{uuid.uuid4().hex}_{safe_filename}"
-    
-    # Try Cloudinary first
+
     if Settings.CLOUDINARY_CLOUD_NAME:
         try:
             result = cloudinary.uploader.upload(
@@ -1960,36 +1820,34 @@ async def upload_image_endpoint(
                 resource_type="image",
                 public_id=f"img_{uuid.uuid4().hex[:12]}"
             )
-            
+
             url = result.get("secure_url", "")
             logger.info(f"Image uploaded to Cloudinary: {url}")
             return {"filename": result.get("public_id", ""), "url": url}
-            
+
         except Exception as e:
             logger.error(f"Cloudinary upload failed: {e}")
             # Fall through to local upload
-    
-    # Local upload
+
     upload_dir = Path("uploads")
     upload_dir.mkdir(exist_ok=True)
-    
+
     file_path = upload_dir / unique_filename
-    
-    # Ensure path is safe
+
     try:
         file_path.resolve().relative_to(upload_dir.resolve())
     except ValueError:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=http_status.HTTP_400_BAD_REQUEST,
             detail="Invalid file path"
         )
-    
+
     with open(file_path, "wb") as f:
         f.write(content)
-    
+
     url = f"{Settings.RENDER_URL}/uploads/{unique_filename}"
     logger.info(f"Image uploaded locally: {url}")
-    
+
     return {"filename": unique_filename, "url": url}
 
 # ============================================================================
@@ -2002,7 +1860,7 @@ async def get_cart_endpoint(current_user: dict = Depends(get_current_user)):
         {"user_id": current_user["user_id"]},
         {"_id": 0}
     )
-    
+
     if not cart:
         return {
             "user_id": current_user["user_id"],
@@ -2011,33 +1869,32 @@ async def get_cart_endpoint(current_user: dict = Depends(get_current_user)):
             "total_bv": 0.0,
             "total_cc": 0.0,
         }
-    
-    # Enrich cart items with product details
+
     items_out = []
     subtotal = 0.0
     total_bv = 0.0
     total_cc = 0.0
-    
+
     for item in cart.get("items", []):
         product = await db_manager.db.products.find_one(
             {"product_id": item["product_id"]},
             {"_id": 0}
         )
-        
+
         if not product or product.get("status") != "active":
             continue
-        
+
         line_total = product["price"] * item["quantity"]
         subtotal += line_total
         total_bv += product.get("bv", 0) * item["quantity"]
         total_cc += product.get("cc", 0) * item["quantity"]
-        
+
         items_out.append({
             "product": product,
             "quantity": item["quantity"],
             "line_total": line_total,
         })
-    
+
     return {
         "user_id": current_user["user_id"],
         "items": items_out,
@@ -2051,27 +1908,25 @@ async def add_to_cart_endpoint(
     current_user: dict = Depends(get_current_user)
 ):
     """Add item to cart."""
-    # Verify product exists and is active
     product = await db_manager.db.products.find_one(
         {"product_id": data.product_id},
         {"_id": 0}
     )
-    
+
     if not product:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
+            status_code=http_status.HTTP_404_NOT_FOUND,
             detail="Product not found"
         )
-    
+
     if product.get("status") != "active":
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=http_status.HTTP_400_BAD_REQUEST,
             detail="Product not available"
         )
-    
-    # Update cart
+
     cart = await db_manager.db.carts.find_one({"user_id": current_user["user_id"]})
-    
+
     if not cart:
         await db_manager.db.carts.insert_one({
             "user_id": current_user["user_id"],
@@ -2080,21 +1935,21 @@ async def add_to_cart_endpoint(
     else:
         items = cart.get("items", [])
         found = False
-        
+
         for item in items:
             if item["product_id"] == data.product_id:
                 item["quantity"] += data.quantity
                 found = True
                 break
-        
+
         if not found:
             items.append({"product_id": data.product_id, "quantity": data.quantity})
-        
+
         await db_manager.db.carts.update_one(
             {"user_id": current_user["user_id"]},
             {"$set": {"items": items}}
         )
-    
+
     return {"ok": True}
 
 async def update_cart_item_endpoint(
@@ -2103,15 +1958,15 @@ async def update_cart_item_endpoint(
 ):
     """Update cart item quantity."""
     cart = await db_manager.db.carts.find_one({"user_id": current_user["user_id"]})
-    
+
     if not cart:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
+            status_code=http_status.HTTP_404_NOT_FOUND,
             detail="Cart is empty"
         )
-    
+
     items = cart.get("items", [])
-    
+
     if data.quantity <= 0:
         items = [item for item in items if item["product_id"] != data.product_id]
     else:
@@ -2121,15 +1976,15 @@ async def update_cart_item_endpoint(
                 item["quantity"] = data.quantity
                 found = True
                 break
-        
+
         if not found:
             items.append({"product_id": data.product_id, "quantity": data.quantity})
-    
+
     await db_manager.db.carts.update_one(
         {"user_id": current_user["user_id"]},
         {"$set": {"items": items}}
     )
-    
+
     return {"ok": True}
 
 async def remove_cart_item_endpoint(
@@ -2138,17 +1993,17 @@ async def remove_cart_item_endpoint(
 ):
     """Remove item from cart."""
     cart = await db_manager.db.carts.find_one({"user_id": current_user["user_id"]})
-    
+
     if not cart:
         return {"ok": True}
-    
+
     items = [item for item in cart.get("items", []) if item["product_id"] != product_id]
-    
+
     await db_manager.db.carts.update_one(
         {"user_id": current_user["user_id"]},
         {"$set": {"items": items}}
     )
-    
+
     return {"ok": True}
 
 async def clear_cart_endpoint(current_user: dict = Depends(get_current_user)):
@@ -2158,7 +2013,7 @@ async def clear_cart_endpoint(current_user: dict = Depends(get_current_user)):
         {"$set": {"items": []}},
         upsert=True
     )
-    
+
     return {"ok": True}
 
 # ============================================================================
@@ -2173,37 +2028,35 @@ def build_upi_url(upi_id: str, name: str, amount: float, order_id: str) -> str:
     return f"upi://pay?pa={upi_id}&pn={pn}&am={amount:.2f}&tn={tn}&cu=INR"
 
 async def checkout_endpoint(
-    request: Request,  # FIXED: Added request for rate limiting
+    request: Request,
     data: CheckoutRequest,
     current_user: dict = Depends(get_current_user)
 ):
     """Process checkout and create order."""
-    await check_rate_limit(request, "checkout")  # FIXED: Added request parameter
-    
-    # Get cart
+    await check_rate_limit(request, "checkout")
+
     cart = await db_manager.db.carts.find_one({"user_id": current_user["user_id"]})
-    
+
     if not cart or not cart.get("items"):
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=http_status.HTTP_400_BAD_REQUEST,
             detail="Cart is empty"
         )
-    
-    # Build order items
+
     items_snapshot = []
     subtotal = 0.0
     total_bv = 0.0
     total_cc = 0.0
-    
+
     for item in cart["items"]:
         product = await db_manager.db.products.find_one(
             {"product_id": item["product_id"]},
             {"_id": 0}
         )
-        
+
         if not product or product.get("status") != "active":
             continue
-        
+
         items_snapshot.append({
             "product_id": product["product_id"],
             "name": product["name"],
@@ -2213,22 +2066,20 @@ async def checkout_endpoint(
             "quantity": item["quantity"],
             "image": (product.get("images") or [""])[0],
         })
-        
+
         subtotal += product["price"] * item["quantity"]
         total_bv += product.get("bv", 0) * item["quantity"]
         total_cc += product.get("cc", 0) * item["quantity"]
-    
+
     if not items_snapshot:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=http_status.HTTP_400_BAD_REQUEST,
             detail="No purchasable items in cart"
         )
-    
-    # Calculate shipping
+
     shipping = 0 if subtotal >= 999 else 49
     total = subtotal + shipping
-    
-    # Create order
+
     order_id = generate_id("ord")
     upi_url = build_upi_url(
         Settings.MERCHANT_UPI_ID,
@@ -2236,7 +2087,7 @@ async def checkout_endpoint(
         total,
         order_id
     ) if Settings.MERCHANT_UPI_ID else ""
-    
+
     order_doc = {
         "order_id": order_id,
         "user_id": current_user["user_id"],
@@ -2255,22 +2106,20 @@ async def checkout_endpoint(
         "upi_url": upi_url,
         "created_at": now_iso(),
     }
-    
+
     await db_manager.db.orders.insert_one(order_doc)
     order_doc.pop("_id", None)
-    
-    # Send confirmation email in background
+
     user_name = current_user.get("name", "Valued Customer")
     asyncio.create_task(
         asyncio.to_thread(send_order_confirmation_email, current_user["email"], user_name, order_doc)
     )
-    
-    # Clear cart
+
     await db_manager.db.carts.update_one(
         {"user_id": current_user["user_id"]},
         {"$set": {"items": []}}
     )
-    
+
     logger.info(f"Order created: {order_id} by user {current_user['user_id']}")
     return {"order": order_doc}
 
@@ -2283,19 +2132,19 @@ async def submit_utr_endpoint(
         {"order_id": data.order_id, "user_id": current_user["user_id"]},
         {"_id": 0}
     )
-    
+
     if not order:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
+            status_code=http_status.HTTP_404_NOT_FOUND,
             detail="Order not found"
         )
-    
+
     if order["status"] not in ("awaiting_payment", "payment_failed"):
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=http_status.HTTP_400_BAD_REQUEST,
             detail="Order is not awaiting payment"
         )
-    
+
     await db_manager.db.orders.update_one(
         {"order_id": data.order_id},
         {"$set": {
@@ -2304,7 +2153,7 @@ async def submit_utr_endpoint(
             "utr_submitted_at": now_iso(),
         }}
     )
-    
+
     logger.info(f"UTR submitted for order {data.order_id}")
     return {"ok": True, "order_id": data.order_id, "status": "awaiting_verification"}
 
@@ -2318,10 +2167,10 @@ async def list_user_orders_endpoint(
         {"user_id": current_user["user_id"]},
         {"_id": 0}
     ).sort("created_at", -1).skip(skip).limit(limit)
-    
+
     orders = await cursor.to_list(length=limit)
     total = await db_manager.db.orders.count_documents({"user_id": current_user["user_id"]})
-    
+
     return {
         "items": orders,
         "total": total,
@@ -2338,13 +2187,13 @@ async def get_user_order_endpoint(
         {"order_id": order_id, "user_id": current_user["user_id"]},
         {"_id": 0}
     )
-    
+
     if not order:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
+            status_code=http_status.HTTP_404_NOT_FOUND,
             detail="Order not found"
         )
-    
+
     return order
 
 async def upi_info_endpoint():
@@ -2368,12 +2217,12 @@ async def admin_list_orders_endpoint(
     query = {}
     if status_filter:
         query["status"] = status_filter
-    
+
     cursor = db_manager.db.orders.find(query, {"_id": 0})
     cursor = cursor.sort("created_at", -1).skip(skip).limit(limit)
     orders = await cursor.to_list(length=limit)
     total = await db_manager.db.orders.count_documents(query)
-    
+
     return {
         "items": orders,
         "total": total,
@@ -2383,7 +2232,7 @@ async def admin_list_orders_endpoint(
 
 async def admin_update_order_status_endpoint(
     order_id: str = PathParam(..., regex=r'^ord_[a-f0-9]{12}$'),
-    status: str = Form(...),
+    new_status: str = Form(..., alias="status"),
     admin: dict = Depends(get_current_admin_user)
 ):
     """Update order status (admin only)."""
@@ -2391,26 +2240,25 @@ async def admin_update_order_status_endpoint(
         "awaiting_payment", "awaiting_verification", "payment_failed",
         "confirmed", "shipped", "delivered", "cancelled"
     ]
-    
-    if status not in valid_statuses:
+
+    if new_status not in valid_statuses:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=http_status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid status. Must be one of: {', '.join(valid_statuses)}"
         )
-    
+
     result = await db_manager.db.orders.update_one(
         {"order_id": order_id},
-        {"$set": {"status": status, "updated_at": now_iso()}}
+        {"$set": {"status": new_status, "updated_at": now_iso()}}
     )
-    
+
     if result.matched_count == 0:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
+            status_code=http_status.HTTP_404_NOT_FOUND,
             detail="Order not found"
         )
-    
-    # Send delivery email
-    if status == "delivered":
+
+    if new_status == "delivered":
         order = await db_manager.db.orders.find_one({"order_id": order_id}, {"_id": 0})
         if order:
             user = await db_manager.db.users.find_one({"user_id": order["user_id"]}, {"_id": 0})
@@ -2418,9 +2266,9 @@ async def admin_update_order_status_endpoint(
             asyncio.create_task(
                 asyncio.to_thread(send_delivery_email, order["user_email"], user_name, order)
             )
-    
-    logger.info(f"Admin {admin['user_id']} updated order {order_id} status to {status}")
-    return {"ok": True, "status": status}
+
+    logger.info(f"Admin {admin['user_id']} updated order {order_id} status to {new_status}")
+    return {"ok": True, "status": new_status}
 
 async def admin_verify_payment_endpoint(
     order_id: str = PathParam(..., regex=r'^ord_[a-f0-9]{12}$'),
@@ -2429,15 +2277,15 @@ async def admin_verify_payment_endpoint(
 ):
     """Verify or reject payment (admin only)."""
     order = await db_manager.db.orders.find_one({"order_id": order_id}, {"_id": 0})
-    
+
     if not order:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
+            status_code=http_status.HTTP_404_NOT_FOUND,
             detail="Order not found"
         )
-    
+
     update_data = {"updated_at": now_iso()}
-    
+
     if data.action == "verify":
         update_data["status"] = "confirmed"
         update_data["paid_at"] = now_iso()
@@ -2445,15 +2293,15 @@ async def admin_verify_payment_endpoint(
     else:
         update_data["status"] = "payment_failed"
         update_data["rejected_by"] = admin["user_id"]
-    
+
     if data.notes:
         update_data["payment_notes"] = data.notes
-    
+
     await db_manager.db.orders.update_one(
         {"order_id": order_id},
         {"$set": update_data}
     )
-    
+
     logger.info(f"Admin {admin['user_id']} {data.action}ed payment for order {order_id}")
     return {"ok": True, "status": update_data["status"]}
 
@@ -2463,13 +2311,13 @@ async def admin_delete_order_endpoint(
 ):
     """Delete an order (admin only)."""
     result = await db_manager.db.orders.delete_one({"order_id": order_id})
-    
+
     if result.deleted_count == 0:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
+            status_code=http_status.HTTP_404_NOT_FOUND,
             detail="Order not found"
         )
-    
+
     logger.info(f"Admin {admin['user_id']} deleted order {order_id}")
     return {"ok": True}
 
@@ -2479,17 +2327,14 @@ async def admin_delete_order_endpoint(
 
 async def admin_stats_endpoint(admin: dict = Depends(get_current_admin_user)):
     """Get admin dashboard statistics."""
-    # Product stats
     total_products = await db_manager.db.products.count_documents({})
     active_products = await db_manager.db.products.count_documents({"status": "active"})
     out_of_stock = await db_manager.db.products.count_documents({"status": "out_of_stock"})
     discontinued = await db_manager.db.products.count_documents({"status": "discontinued"})
-    
-    # Order stats
+
     total_orders = await db_manager.db.orders.count_documents({})
     awaiting_verification = await db_manager.db.orders.count_documents({"status": "awaiting_verification"})
-    
-    # Revenue stats
+
     revenue_pipeline = [
         {"$match": {"status": {"$in": ["confirmed", "shipped", "delivered"]}}},
         {"$group": {
@@ -2501,10 +2346,9 @@ async def admin_stats_endpoint(admin: dict = Depends(get_current_admin_user)):
     ]
     revenue_doc = await db_manager.db.orders.aggregate(revenue_pipeline).to_list(1)
     revenue = revenue_doc[0] if revenue_doc else {"total": 0, "bv": 0, "cc": 0}
-    
-    # User stats
+
     total_users = await db_manager.db.users.count_documents({})
-    
+
     return {
         "products": {
             "total": total_products,
@@ -2562,16 +2406,14 @@ async def track_click_endpoint(data: ClickTrack, request: Request):
 
 async def admin_get_analytics_endpoint(admin: dict = Depends(get_current_admin_user)):
     """Get analytics data (admin only)."""
-    # Basic stats
     total_visits = await db_manager.db.analytics_visits.count_documents({})
     unique_visitors = len(await db_manager.db.analytics_visits.distinct("session_id"))
-    
+
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     today_visits = await db_manager.db.analytics_visits.count_documents(
         {"timestamp": {"$regex": f"^{today}"}}
     )
-    
-    # Top pages
+
     page_pipeline = [
         {"$group": {"_id": "$page", "count": {"$sum": 1}}},
         {"$sort": {"count": -1}},
@@ -2581,8 +2423,7 @@ async def admin_get_analytics_endpoint(admin: dict = Depends(get_current_admin_u
         {"page": d["_id"], "count": d["count"]}
         async for d in db_manager.db.analytics_visits.aggregate(page_pipeline)
     ]
-    
-    # Daily visits (last 7 days)
+
     daily = []
     for i in range(6, -1, -1):
         day = (datetime.now(timezone.utc) - timedelta(days=i)).strftime("%Y-%m-%d")
@@ -2590,8 +2431,7 @@ async def admin_get_analytics_endpoint(admin: dict = Depends(get_current_admin_u
             {"timestamp": {"$regex": f"^{day}"}}
         )
         daily.append({"date": day, "visits": count})
-    
-    # Top clicks
+
     click_pipeline = [
         {"$group": {
             "_id": {"element": "$element", "label": "$label", "page": "$page"},
@@ -2609,7 +2449,7 @@ async def admin_get_analytics_endpoint(admin: dict = Depends(get_current_admin_u
         }
         async for d in db_manager.db.analytics_clicks.aggregate(click_pipeline)
     ]
-    
+
     return {
         "total_visits": total_visits,
         "unique_visitors": unique_visitors,
@@ -2625,13 +2465,12 @@ async def admin_get_analytics_endpoint(admin: dict = Depends(get_current_admin_u
 
 async def health_check_endpoint():
     """Health check endpoint."""
-    # Check database connection
     try:
         await db_manager.db.command("ping")
         db_status = "healthy"
     except Exception as e:
         db_status = f"unhealthy: {str(e)}"
-    
+
     return {
         "status": "ok",
         "service": Settings.APP_NAME,
@@ -2641,12 +2480,27 @@ async def health_check_endpoint():
         "database": db_status,
     }
 
+async def readiness_check_endpoint():
+    """
+    Readiness endpoint, distinct from /health.
+    /health = process is up. /ready = process is up AND dependencies (DB) are
+    reachable, so it can safely receive traffic behind a load balancer.
+    """
+    try:
+        await db_manager.db.command("ping")
+        return {"status": "ready"}
+    except Exception as e:
+        return JSONResponse(
+            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"status": "not_ready", "reason": str(e)}
+        )
+
 async def metrics_endpoint():
     """Basic metrics endpoint."""
     product_count = await db_manager.db.products.count_documents({})
     order_count = await db_manager.db.orders.count_documents({})
     user_count = await db_manager.db.users.count_documents({})
-    
+
     return {
         "metrics": {
             "products": product_count,
@@ -2663,15 +2517,13 @@ async def metrics_endpoint():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
-    # Startup
     logger.info(f"Starting {Settings.APP_NAME} v{Settings.APP_VERSION}")
     await db_manager.connect()
     await seed_initial_data()
     logger.info("Application started successfully")
-    
+
     yield
-    
-    # Shutdown
+
     logger.info("Shutting down application...")
     await db_manager.close()
     logger.info("Application shutdown complete")
@@ -2698,7 +2550,6 @@ class SafeJSONResponse(JSONResponse):
         return super().render(_mongo_safe(content))
 
 
-# Create FastAPI app
 app = FastAPI(
     title=Settings.APP_NAME,
     version=Settings.APP_VERSION,
@@ -2713,33 +2564,23 @@ app = FastAPI(
 # ============================================================================
 # MIDDLEWARE SETUP
 # ============================================================================
+#
+# IMPORTANT — middleware order:
+# Starlette wraps middleware so that the FIRST one added via add_middleware()
+# ends up OUTERMOST (it sees the request first and the response last); the
+# LAST one added ends up innermost, right next to routing/exception handling.
+#
+# CORS must therefore be added FIRST, not last. If TrustedHostMiddleware (or
+# anything else) runs outside of CORSMiddleware, any response it generates
+# directly (e.g. its 400 for an untrusted Host header) never passes through
+# CORSMiddleware and will be reported by the browser as a CORS failure even
+# though the real cause is something else entirely. This exact ordering bug
+# is a likely contributor to the "blocked by CORS policy" symptom paired
+# with a 500 response.
 
-# ============================================================================
-# MIDDLEWARE SETUP - FIXED CORS
-# ============================================================================
-
-# Security middlewares
-app.add_middleware(SecurityHeadersMiddleware)
-app.add_middleware(RequestIDMiddleware)
-app.add_middleware(RequestLoggingMiddleware)
-
-# Trusted hosts
-app.add_middleware(
-    TrustedHostMiddleware,
-    allowed_hosts=[
-        "localhost",
-        "127.0.0.1",
-        "*.vercel.app",
-        "*.onrender.com",
-    ]
-)
-
-# CORS - MUST BE THE OUTERMOST MIDDLEWARE
-# IMPORTANT: CORS middleware must be added LAST so it can handle all requests
 app.add_middleware(
     CORSMiddleware,
     allow_origins=Settings.CORS_ORIGINS,
-    # This regex will match ALL vercel domains (including preview deployments)
     allow_origin_regex=r"https?://.*\.vercel\.app",
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
@@ -2761,17 +2602,31 @@ app.add_middleware(
     ],
     max_age=86400,
 )
+
+app.add_middleware(
+    TrustedHostMiddleware,
+    allowed_hosts=[
+        "localhost",
+        "127.0.0.1",
+        "*.vercel.app",
+        "*.onrender.com",
+    ]
+)
+
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(RequestIDMiddleware)
+app.add_middleware(RequestLoggingMiddleware)
+
 # ============================================================================
 # SEED DATA
 # ============================================================================
 
 async def seed_initial_data():
     """Seed initial data if database is empty."""
-    # Seed admin user
     existing_admin = await db_manager.db.users.find_one(
         {"email": Settings.ADMIN_EMAIL.lower()}
     )
-    
+
     if not existing_admin:
         admin_doc = {
             "user_id": generate_id("user"),
@@ -2785,7 +2640,6 @@ async def seed_initial_data():
         await db_manager.db.users.insert_one(admin_doc)
         logger.info(f"Admin user created: {Settings.ADMIN_EMAIL}")
     else:
-        # Update admin password if needed
         if not password_hasher.verify(
             Settings.ADMIN_PASSWORD,
             existing_admin.get("password_hash", "")
@@ -2795,10 +2649,9 @@ async def seed_initial_data():
                 {"$set": {"password_hash": password_hasher.hash(Settings.ADMIN_PASSWORD)}}
             )
             logger.info(f"Admin password updated: {Settings.ADMIN_EMAIL}")
-    
-    # Seed sample products if empty
+
     product_count = await db_manager.db.products.count_documents({})
-    
+
     if product_count == 0:
         sample_products = [
             {
@@ -2872,14 +2725,14 @@ async def seed_initial_data():
                 "sku": "FLP-022",
             },
         ]
-        
+
         now = now_iso()
         for product in sample_products:
             product["product_id"] = generate_id("prod")
             product["created_at"] = now
             product["updated_at"] = now
             await db_manager.db.products.insert_one(product)
-        
+
         logger.info(f"Seeded {len(sample_products)} sample products")
 
 # ============================================================================
@@ -2895,17 +2748,16 @@ async def validation_exception_handler(request: Request, exc: ValidationError):
             "field": ".".join(str(loc) for loc in error["loc"]),
             "message": error["msg"],
         })
-    
+
     logger.warning(f"Validation error: {errors}")
     return JSONResponse(
-        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        status_code=http_status.HTTP_422_UNPROCESSABLE_ENTITY,
         content={"detail": "Validation error", "errors": errors[:5]}
     )
 
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException):
     """Handle HTTP exceptions."""
-    # Log but don't expose internal details
     logger.warning(f"HTTP exception: {exc.detail}")
     return JSONResponse(
         status_code=exc.status_code,
@@ -2915,12 +2767,10 @@ async def http_exception_handler(request: Request, exc: HTTPException):
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     """Handle all unhandled exceptions."""
-    # Log full error for debugging
     logger.error(f"Unhandled exception: {exc}", exc_info=True)
-    
-    # Return generic error to client
+
     return JSONResponse(
-        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
         content={"detail": "An internal error occurred. Please try again later."}
     )
 
@@ -2928,11 +2778,10 @@ async def global_exception_handler(request: Request, exc: Exception):
 # REGISTER ROUTES
 # ============================================================================
 
-# Health endpoints
 app.get("/health", tags=["Health"])(health_check_endpoint)
+app.get("/ready", tags=["Health"])(readiness_check_endpoint)
 app.get("/metrics", tags=["Metrics"])(metrics_endpoint)
 
-# Auth endpoints
 auth_router = app
 auth_router.post(
     f"{Settings.API_PREFIX}/auth/register",
@@ -2948,7 +2797,6 @@ auth_router.post(
     response_model=AuthResponse,
 )(auth_login_endpoint)
 
-# FIXED: Google login endpoint registration - removed response_model to avoid validation issues
 auth_router.post(
     f"{Settings.API_PREFIX}/auth/google-login",
     tags=["Authentication"],
@@ -2975,7 +2823,6 @@ auth_router.get(
     response_model=UserResponse,
 )(auth_me_endpoint)
 
-# Product endpoints
 app.get(
     f"{Settings.API_PREFIX}/products",
     tags=["Products"],
@@ -2994,7 +2841,6 @@ app.get(
     summary="Get product by ID",
 )(get_product_endpoint)
 
-# Admin product endpoints
 app.post(
     f"{Settings.API_PREFIX}/admin/products",
     tags=["Admin", "Products"],
@@ -3030,7 +2876,6 @@ app.get(
     dependencies=[Depends(get_current_admin_user)],
 )(admin_list_all_products_endpoint)
 
-# Upload endpoint
 app.post(
     f"{Settings.API_PREFIX}/admin/upload",
     tags=["Admin", "Uploads"],
@@ -3038,7 +2883,6 @@ app.post(
     dependencies=[Depends(get_current_admin_user)],
 )(upload_image_endpoint)
 
-# Cart endpoints
 app.get(
     f"{Settings.API_PREFIX}/cart",
     tags=["Cart"],
@@ -3074,7 +2918,6 @@ app.post(
     dependencies=[Depends(get_current_user)],
 )(clear_cart_endpoint)
 
-# Order endpoints
 app.post(
     f"{Settings.API_PREFIX}/checkout",
     tags=["Orders"],
@@ -3109,7 +2952,6 @@ app.get(
     summary="Get UPI payment info",
 )(upi_info_endpoint)
 
-# Admin order endpoints
 app.get(
     f"{Settings.API_PREFIX}/admin/orders",
     tags=["Admin", "Orders"],
@@ -3138,7 +2980,6 @@ app.delete(
     dependencies=[Depends(get_current_admin_user)],
 )(admin_delete_order_endpoint)
 
-# Admin stats
 app.get(
     f"{Settings.API_PREFIX}/admin/stats",
     tags=["Admin", "Statistics"],
@@ -3146,7 +2987,6 @@ app.get(
     dependencies=[Depends(get_current_admin_user)],
 )(admin_stats_endpoint)
 
-# Analytics endpoints
 app.post(
     f"{Settings.API_PREFIX}/analytics/visit",
     tags=["Analytics"],
@@ -3166,7 +3006,6 @@ app.get(
     dependencies=[Depends(get_current_admin_user)],
 )(admin_get_analytics_endpoint)
 
-# Root endpoint
 @app.get("/", tags=["Root"])
 async def root():
     """Root endpoint."""
@@ -3181,7 +3020,6 @@ async def root():
 # STATIC FILES
 # ============================================================================
 
-# Mount uploads directory
 upload_path = Path("uploads")
 upload_path.mkdir(exist_ok=True)
 
@@ -3197,7 +3035,7 @@ app.mount(
 
 if __name__ == "__main__":
     import uvicorn
-    
+
     uvicorn.run(
         "server:app",
         host=Settings.HOST,
