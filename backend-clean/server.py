@@ -1287,7 +1287,7 @@ async def auth_register_endpoint(request: Request, data: RegisterRequest):
             value=refresh_token,
             httponly=True,
             secure=True,
-            samesite="lax",
+            samesite="none",  # cross-site cookie: frontend and backend are on different domains
             max_age=Settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
             path=f"{Settings.API_PREFIX}/auth/refresh"
         )
@@ -1350,7 +1350,7 @@ async def auth_login_endpoint(request: Request, data: LoginRequest):
             value=refresh_token,
             httponly=True,
             secure=True,
-            samesite="lax",
+            samesite="none",  # cross-site cookie: frontend and backend are on different domains
             max_age=Settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
             path=f"{Settings.API_PREFIX}/auth/refresh"
         )
@@ -1484,7 +1484,7 @@ async def auth_google_login_endpoint(request: Request):
             value=refresh_token,
             httponly=True,
             secure=True,
-            samesite="lax",
+            samesite="none",  # cross-site cookie: frontend and backend are on different domains
             max_age=Settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
             path=f"{Settings.API_PREFIX}/auth/refresh"
         )
@@ -1551,7 +1551,7 @@ async def auth_refresh_endpoint(request: Request):
                 value=new_refresh_token,
                 httponly=True,
                 secure=True,
-                samesite="lax",
+                samesite="none",  # cross-site cookie: frontend and backend are on different domains
                 max_age=Settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
                 path=f"{Settings.API_PREFIX}/auth/refresh"
             )
