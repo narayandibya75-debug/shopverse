@@ -20,6 +20,7 @@ import asyncio
 import logging
 import smtplib
 import secrets
+import random
 from typing import Dict, List, Optional, Any, Union, Literal, Tuple
 from datetime import datetime, timezone, timedelta
 from email.mime.multipart import MIMEMultipart
@@ -147,6 +148,14 @@ class Settings:
     # Gemini chatbot
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
     GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+    # Used only if the primary model fails with a transient/capacity error,
+    # or if the primary model itself turns out to be unavailable/not found.
+    GEMINI_FALLBACK_MODEL: str = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.5-flash")
+    # Per-attempt network timeout for a single Gemini call.
+    GEMINI_TIMEOUT_SECONDS: float = float(os.getenv("GEMINI_TIMEOUT_SECONDS", "10"))
+    # Hard ceiling on the whole primary+fallback+retries sequence, so a single
+    # chat request can never hang indefinitely regardless of retry count.
+    GEMINI_TOTAL_TIMEOUT_SECONDS: float = float(os.getenv("GEMINI_TOTAL_TIMEOUT_SECONDS", "25"))
     CHAT_MAX_HISTORY: int = int(os.getenv("CHAT_MAX_HISTORY", "12"))
     CHAT_RATE_LIMIT: int = int(os.getenv("CHAT_RATE_LIMIT", "20"))
     CHAT_RATE_WINDOW_SECONDS: int = int(os.getenv("CHAT_RATE_WINDOW_SECONDS", "60"))
@@ -2951,7 +2960,7 @@ async def chat_endpoint(request: Request, data: ChatRequest):
         )
 
     if not reply:
-        reply = "I’m sorry, I couldn’t generate an answer right now. Please try again or contact support."
+        reply = "I'm sorry, I couldn't generate an answer right now. Please try again or contact support."
 
     product_cards = [_chat_product_context(p) for p in products[:4]]
     return {
