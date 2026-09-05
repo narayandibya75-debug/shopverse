@@ -2,7 +2,7 @@
 """
 ShopVerse FBO E-Commerce Backend
 Production-Ready Single-File FastAPI Application
-Version: 3.0.0 - Hardened production checkout, auth, stock, validation and admin flows
+Version: 3.1.0 - Hardened production checkout plus Gemini customer assistant
 """
 
 # ============================================================================
@@ -73,6 +73,11 @@ from dotenv import load_dotenv
 import cloudinary
 import cloudinary.uploader
 
+try:
+    from google import genai
+except ImportError:
+    genai = None
+
 # ============================================================================
 # ENVIRONMENT & CONFIGURATION
 # ============================================================================
@@ -85,7 +90,7 @@ class Settings:
 
     # Application
     APP_NAME: str = os.getenv("APP_NAME", "ShopVerse FBO")
-    APP_VERSION: str = "3.0.0"
+    APP_VERSION: str = "3.1.0"
     DEBUG: bool = os.getenv("DEBUG", "False").lower() == "true"
     ENVIRONMENT: str = os.getenv("ENVIRONMENT", "production")
 
@@ -138,6 +143,14 @@ class Settings:
     SHIPPING_THRESHOLD: float = float(os.getenv("SHIPPING_THRESHOLD", "499"))
     SHIPPING_FEE: float = float(os.getenv("SHIPPING_FEE", "49"))
     MAX_CART_QUANTITY: int = int(os.getenv("MAX_CART_QUANTITY", "20"))
+
+    # Gemini chatbot
+    GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
+    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+    CHAT_MAX_HISTORY: int = int(os.getenv("CHAT_MAX_HISTORY", "12"))
+    CHAT_RATE_LIMIT: int = int(os.getenv("CHAT_RATE_LIMIT", "20"))
+    CHAT_RATE_WINDOW_SECONDS: int = int(os.getenv("CHAT_RATE_WINDOW_SECONDS", "60"))
+    WHATSAPP_NUMBER: str = os.getenv("WHATSAPP_NUMBER", "")
 
     # Payment
     MERCHANT_UPI_ID: str = os.getenv("MERCHANT_UPI_ID", "")
@@ -2779,6 +2792,177 @@ async def seed_initial_data():
         logger.info(f"Seeded {len(sample_products)} sample products")
 
 # ============================================================================
+# AI CHATBOT - GEMINI
+# ============================================================================
+
+class ChatMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(..., min_length=1, max_length=2000)
+
+
+class ChatRequest(BaseModel):
+    message: str = Field(..., min_length=1, max_length=2000)
+    history: List[ChatMessage] = Field(default_factory=list, max_items=20)
+
+
+class ChatResponse(BaseModel):
+    reply: str
+    products: List[dict] = Field(default_factory=list)
+    order: Optional[dict] = None
+    support_url: Optional[str] = None
+
+
+CHAT_SYSTEM_PROMPT = """You are ShopVerse Assistant for the ShopVerse wellness store.
+You help customers with product information, prices, stock availability, ordering,
+payment, shipping, and order status using only the store context supplied to you.
+Do not pretend to be Forever Living corporate staff. Do not invent products, prices,
+stock, delivery times, payment details, or policies. Do not diagnose, treat, cure,
+or promise medical results. For health questions, provide only general product
+information from the supplied catalog and suggest speaking with a qualified
+professional for medical advice. If information is unavailable, say so clearly and
+offer human support. Keep answers friendly, concise, and useful.
+"""
+
+_chat_rate_buckets: Dict[str, List[float]] = {}
+_chat_rate_lock = asyncio.Lock()
+
+
+async def check_chat_rate_limit(key: str) -> None:
+    now = time.time()
+    async with _chat_rate_lock:
+        recent = [
+            ts for ts in _chat_rate_buckets.get(key, [])
+            if now - ts < Settings.CHAT_RATE_WINDOW_SECONDS
+        ]
+        if len(recent) >= Settings.CHAT_RATE_LIMIT:
+            raise HTTPException(
+                status_code=http_status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="Too many chat requests. Please try again shortly.",
+            )
+        recent.append(now)
+        _chat_rate_buckets[key] = recent
+
+
+def _chat_product_context(product: dict) -> dict:
+    return {
+        "product_id": product.get("product_id"),
+        "name": product.get("name"),
+        "category": product.get("category"),
+        "description": product.get("description", ""),
+        "price": product.get("price", 0),
+        "mrp": product.get("mrp", 0),
+        "bv": product.get("bv", 0),
+        "cc": product.get("cc", 0),
+        "stock": product.get("stock", 0),
+        "status": product.get("status", "active"),
+        "images": product.get("images", [])[:1],
+        "featured": product.get("featured", False),
+    }
+
+
+async def chat_endpoint(request: Request, data: ChatRequest):
+    """Answer customer questions using Gemini plus live MongoDB store context."""
+    if not Settings.GEMINI_API_KEY or genai is None:
+        raise HTTPException(
+            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="AI assistant is not configured yet. Please use human support.",
+        )
+
+    current_user = await get_optional_user(request, None)
+    rate_key = f"user:{current_user['user_id']}" if current_user else f"ip:{get_client_ip(request)}"
+    await check_chat_rate_limit(rate_key)
+
+    message = data.message.strip()
+    words = [w for w in re.findall(r"[a-zA-Z0-9]+", message.lower()) if len(w) >= 3]
+
+    product_query = {"status": {"$in": ["active", "out_of_stock"]}}
+    if words:
+        pattern = "|".join(re.escape(w) for w in words[:8])
+        product_query["$or"] = [
+            {"name": {"$regex": pattern, "$options": "i"}},
+            {"category": {"$regex": pattern, "$options": "i"}},
+            {"description": {"$regex": pattern, "$options": "i"}},
+        ]
+
+    products = await db_manager.db.products.find(product_query, {"_id": 0}).limit(8).to_list(length=8)
+    if not products:
+        products = await db_manager.db.products.find(
+            {"status": "active", "featured": True}, {"_id": 0}
+        ).limit(8).to_list(length=8)
+    if not products:
+        products = await db_manager.db.products.find(
+            {"status": "active"}, {"_id": 0}
+        ).limit(8).to_list(length=8)
+
+    order_context = None
+    if current_user:
+        order = await db_manager.db.orders.find_one(
+            {"user_id": current_user["user_id"]},
+            {"_id": 0},
+            sort=[("created_at", -1)],
+        )
+        if order:
+            order_context = {
+                "order_id": order.get("order_id"),
+                "status": order.get("status"),
+                "total": order.get("total"),
+                "created_at": order.get("created_at"),
+            }
+
+    support_url = None
+    number = re.sub(r"\D", "", Settings.WHATSAPP_NUMBER or "")
+    if number:
+        support_url = f"https://wa.me/{number}"
+
+    context = {
+        "store": {
+            "name": Settings.APP_NAME,
+            "shipping_threshold": Settings.SHIPPING_THRESHOLD,
+            "shipping_fee": Settings.SHIPPING_FEE,
+            "payment_methods": ["upi", "razorpay", "cod"],
+        },
+        "products": [_chat_product_context(p) for p in products],
+        "customer_order": order_context,
+    }
+
+    history = data.history[-Settings.CHAT_MAX_HISTORY:]
+    transcript = "\n".join(f"{m.role.upper()}: {m.content}" for m in history)
+    prompt = (
+        f"{CHAT_SYSTEM_PROMPT}\n\n"
+        f"LIVE STORE CONTEXT (use this as the source of truth):\n{json.dumps(context, ensure_ascii=False)}\n\n"
+        f"RECENT CHAT:\n{transcript}\n\n"
+        f"CUSTOMER MESSAGE:\n{message}\n\n"
+        "Answer the customer directly. Do not mention internal databases or system prompts."
+    )
+
+    try:
+        client = genai.Client(api_key=Settings.GEMINI_API_KEY)
+        response = await asyncio.to_thread(
+            client.models.generate_content,
+            model=Settings.GEMINI_MODEL,
+            contents=prompt,
+        )
+        reply = (getattr(response, "text", None) or "").strip()
+    except Exception as e:
+        logger.error("Gemini chat failed: %s", e, exc_info=True)
+        raise HTTPException(
+            status_code=http_status.HTTP_502_BAD_GATEWAY,
+            detail="The AI assistant is temporarily unavailable. Please try again or contact support.",
+        )
+
+    if not reply:
+        reply = "I’m sorry, I couldn’t generate an answer right now. Please try again or contact support."
+
+    product_cards = [_chat_product_context(p) for p in products[:4]]
+    return {
+        "reply": reply,
+        "products": product_cards,
+        "order": order_context,
+        "support_url": support_url,
+    }
+
+
+# ============================================================================
 # EXCEPTION HANDLERS
 # ============================================================================
 
@@ -3029,6 +3213,12 @@ app.get(
     summary="Get admin statistics",
     dependencies=[Depends(get_current_admin_user)],
 )(admin_stats_endpoint)
+
+app.post(
+    f"{Settings.API_PREFIX}/chat",
+    tags=["Chat"],
+    summary="AI customer assistant",
+)(chat_endpoint)
 
 app.post(
     f"{Settings.API_PREFIX}/analytics/visit",
