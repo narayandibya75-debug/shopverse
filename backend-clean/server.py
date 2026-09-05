@@ -2,7 +2,7 @@
 """
 ShopVerse FBO E-Commerce Backend
 Production-Ready Single-File FastAPI Application
-Version: 2.0.2 - Fixed CORS ordering, status-param shadowing bug, Google auth hardening
+Version: 3.0.0 - Hardened production checkout, auth, stock, validation and admin flows
 """
 
 # ============================================================================
@@ -85,7 +85,7 @@ class Settings:
 
     # Application
     APP_NAME: str = os.getenv("APP_NAME", "ShopVerse FBO")
-    APP_VERSION: str = "2.0.2"
+    APP_VERSION: str = "3.0.0"
     DEBUG: bool = os.getenv("DEBUG", "False").lower() == "true"
     ENVIRONMENT: str = os.getenv("ENVIRONMENT", "production")
 
@@ -133,6 +133,11 @@ class Settings:
     CLOUDINARY_CLOUD_NAME: str = os.getenv("CLOUDINARY_CLOUD_NAME", "")
     CLOUDINARY_API_KEY: str = os.getenv("CLOUDINARY_API_KEY", "")
     CLOUDINARY_API_SECRET: str = os.getenv("CLOUDINARY_API_SECRET", "")
+
+    # Checkout
+    SHIPPING_THRESHOLD: float = float(os.getenv("SHIPPING_THRESHOLD", "499"))
+    SHIPPING_FEE: float = float(os.getenv("SHIPPING_FEE", "49"))
+    MAX_CART_QUANTITY: int = int(os.getenv("MAX_CART_QUANTITY", "20"))
 
     # Payment
     MERCHANT_UPI_ID: str = os.getenv("MERCHANT_UPI_ID", "")
@@ -327,12 +332,15 @@ class Database:
             await self._db.products.create_index("status")
             await self._db.products.create_index("featured")
             await self._db.products.create_index("created_at")
+            await self._db.products.create_index("sku", sparse=True, unique=True)
 
             # Orders
             await self._db.orders.create_index("order_id", unique=True)
             await self._db.orders.create_index("user_id")
             await self._db.orders.create_index("status")
             await self._db.orders.create_index("created_at")
+            await self._db.orders.create_index("payment_ref", sparse=True)
+            await self._db.orders.create_index([("user_id", 1), ("created_at", -1)])
 
             # Carts
             await self._db.carts.create_index("user_id", unique=True)
@@ -431,7 +439,10 @@ class PasswordHasher:
 
     @staticmethod
     def verify(password: str, hashed: str) -> bool:
-        return bcrypt.checkpw(password.encode('utf-8'), hashed.encode('utf-8'))
+        try:
+            return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
+        except (ValueError, TypeError):
+            return False
 
 class JWTManager:
     """JWT token management with full security claims."""
@@ -750,8 +761,21 @@ class ProductBase(BaseModel):
 class ProductCreate(ProductBase):
     pass
 
-class ProductUpdate(ProductBase):
-    pass
+
+class ProductUpdate(BaseModel):
+    name: Optional[str] = Field(None, min_length=1, max_length=200)
+    description: Optional[str] = Field(None, min_length=10, max_length=2000)
+    category: Optional[str] = Field(None, min_length=1, max_length=50)
+    mrp: Optional[float] = Field(None, gt=0)
+    price: Optional[float] = Field(None, gt=0)
+    bv: Optional[float] = Field(None, ge=0)
+    cc: Optional[float] = Field(None, ge=0)
+    stock: Optional[int] = Field(None, ge=0)
+    status: Optional[Literal["active", "out_of_stock", "discontinued"]] = None
+    images: Optional[List[str]] = Field(None, max_items=10)
+    featured: Optional[bool] = None
+    sku: Optional[str] = Field(None, max_length=50)
+
 
 class ProductResponse(ProductBase):
     product_id: str
@@ -943,83 +967,44 @@ async def get_optional_user(
 # ============================================================================
 
 async def verify_google_token(id_token_str: str) -> Dict[str, Any]:
-    """
-    Verify a Google ID token.
-
-    NOTE: this uses Google's `tokeninfo` endpoint, which is convenient but is
-    explicitly documented by Google as NOT recommended for production traffic
-    (it is rate limited and intended for debugging). For production, verify
-    the token's signature locally against Google's public JWKS using the
-    `google-auth` package instead:
-
-        from google.oauth2 import id_token as google_id_token
-        from google.auth.transport import requests as google_requests
-        payload = google_id_token.verify_oauth2_token(
-            id_token_str, google_requests.Request(), Settings.GOOGLE_CLIENT_ID
-        )
-
-    That approach does not depend on an outbound network call per login and
-    will not be silently rate-limited by Google under load.
-    """
+    """Verify a Google ID token and return trusted claims."""
     if not Settings.GOOGLE_CLIENT_ID:
-        # This is the most common cause of a 500 on /auth/google-login in
-        # production: GOOGLE_CLIENT_ID was never set (or was set only on the
-        # frontend/Vercel, not on the backend/Render) as an environment
-        # variable, so every request reaches this branch and raises.
-        logger.error("GOOGLE_CLIENT_ID is not configured on the backend")
-        raise HTTPException(
-            status_code=http_status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Google authentication is not configured on the server"
-        )
-
+        raise HTTPException(status_code=503, detail="Google authentication is not configured")
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            response = await client.get(
-                "https://oauth2.googleapis.com/tokeninfo",
-                params={"id_token": id_token_str}
+        try:
+            from google.oauth2 import id_token as google_id_token
+            from google.auth.transport import requests as google_requests
+            payload = await asyncio.to_thread(
+                google_id_token.verify_oauth2_token,
+                id_token_str, google_requests.Request(), Settings.GOOGLE_CLIENT_ID
             )
-
+        except ImportError:
+            async with httpx.AsyncClient(timeout=8.0) as client:
+                response = await client.get(
+                    "https://oauth2.googleapis.com/tokeninfo",
+                    params={"id_token": id_token_str}
+                )
             if response.status_code != 200:
-                logger.error(f"Google tokeninfo failed: {response.text}")
                 raise ValueError("Invalid Google token")
-
             payload = response.json()
-
-            if payload.get("aud") != Settings.GOOGLE_CLIENT_ID:
-                logger.error(f"Invalid audience: {payload.get('aud')}")
-                raise ValueError("Invalid token audience")
-
-            if payload.get("iss") not in ["accounts.google.com", "https://accounts.google.com"]:
-                logger.error(f"Invalid issuer: {payload.get('iss')}")
-                raise ValueError("Invalid token issuer")
-
-            return payload
-
-    except httpx.TimeoutException:
-        logger.error("Google API timeout")
-        raise HTTPException(
-            status_code=http_status.HTTP_504_GATEWAY_TIMEOUT,
-            detail="Google authentication timeout"
-        )
-    except httpx.RequestError as e:
-        logger.error(f"Google API request error: {e}")
-        raise HTTPException(
-            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Google authentication service unavailable"
-        )
-    except ValueError as e:
-        raise HTTPException(
-            status_code=http_status.HTTP_401_UNAUTHORIZED,
-            detail=str(e)
-        )
+        if payload.get("aud") != Settings.GOOGLE_CLIENT_ID:
+            raise ValueError("Invalid token audience")
+        if payload.get("iss") not in ("accounts.google.com", "https://accounts.google.com"):
+            raise ValueError("Invalid token issuer")
+        if payload.get("email_verified") is not True:
+            raise ValueError("Google email is not verified")
+        if not payload.get("sub") or not payload.get("email"):
+            raise ValueError("Google token is missing required claims")
+        return payload
     except HTTPException:
         raise
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="Google authentication timeout")
+    except httpx.RequestError:
+        raise HTTPException(status_code=503, detail="Google authentication service unavailable")
     except Exception as e:
-        logger.error(f"Google verification failed: {e}")
-        raise HTTPException(
-            status_code=http_status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid Google authentication"
-        )
+        logger.warning("Google verification failed: %s", e)
+        raise HTTPException(status_code=401, detail="Invalid Google authentication")
 
 # ============================================================================
 # EMAIL FUNCTIONS
@@ -1075,7 +1060,7 @@ def send_order_confirmation_email(to_email: str, user_name: str, order: dict) ->
             </div>
             <div style="padding:28px 32px;">
                 <p style="font-size:15px;color:#333;">Hi <strong>{user_name}</strong>,</p>
-                <p style="color:#555;font-size:14px;">Your order has been confirmed. Here are the details:</p>
+                <p style="color:#555;font-size:14px;">We received your order request. Payment is awaiting completion/verification. Here are the details:</p>
                 <div style="background:#f0f7f3;border-left:4px solid #1a5c38;padding:12px 16px;border-radius:6px;margin:16px 0;">
                     <strong style="color:#1a5c38;">Order ID:</strong>
                     <span style="font-family:monospace;color:#333;margin-left:8px;">{order.get('order_id', '')}</span>
@@ -1104,7 +1089,7 @@ def send_order_confirmation_email(to_email: str, user_name: str, order: dict) ->
                 </div>
                 <p style="font-size:13px;color:#777;margin-top:16px;">
                     <strong>Payment:</strong> {order.get('payment_method', 'UPI').upper()} &nbsp;|&nbsp;
-                    <strong>Status:</strong> Awaiting Payment
+                    <strong>Status:</strong> {order.get('status', 'awaiting_payment').replace('_', ' ').title()}
                 </p>
                 <p style="font-size:14px;color:#333;margin-top:24px;">
                     Thank you for choosing <strong style="color:#1a5c38;">ShopVerse FBO</strong>! 🌿
@@ -1926,10 +1911,9 @@ async def add_to_cart_endpoint(
         )
 
     if product.get("status") != "active":
-        raise HTTPException(
-            status_code=http_status.HTTP_400_BAD_REQUEST,
-            detail="Product not available"
-        )
+        raise HTTPException(status_code=400, detail="Product not available")
+    if int(product.get("stock", 0)) < data.quantity:
+        raise HTTPException(status_code=400, detail="Not enough stock available")
 
     cart = await db_manager.db.carts.find_one({"user_id": current_user["user_id"]})
 
@@ -2062,6 +2046,11 @@ async def checkout_endpoint(
 
         if not product or product.get("status") != "active":
             continue
+        quantity = int(item.get("quantity", 0))
+        if quantity <= 0 or quantity > Settings.MAX_CART_QUANTITY:
+            raise HTTPException(status_code=400, detail="Invalid cart quantity")
+        if int(product.get("stock", 0)) < quantity:
+            raise HTTPException(status_code=409, detail=f"Insufficient stock for {product.get('name', 'a product')}")
 
         items_snapshot.append({
             "product_id": product["product_id"],
@@ -2083,7 +2072,7 @@ async def checkout_endpoint(
             detail="No purchasable items in cart"
         )
 
-    shipping = 0 if subtotal >= 999 else 49
+    shipping = 0.0 if subtotal >= Settings.SHIPPING_THRESHOLD else Settings.SHIPPING_FEE
     total = subtotal + shipping
 
     order_id = generate_id("ord")
@@ -2113,7 +2102,25 @@ async def checkout_endpoint(
         "created_at": now_iso(),
     }
 
-    await db_manager.db.orders.insert_one(order_doc)
+    # Reserve stock atomically before creating the order. Roll back if order insert fails.
+    reserved = []
+    try:
+        for item in items_snapshot:
+            result = await db_manager.db.products.update_one(
+                {"product_id": item["product_id"], "status": "active", "stock": {"$gte": item["quantity"]}},
+                {"$inc": {"stock": -item["quantity"]}, "$set": {"updated_at": now_iso()}},
+            )
+            if result.modified_count != 1:
+                raise HTTPException(status_code=409, detail=f"Stock changed for {item['name']}. Please review your cart.")
+            reserved.append(item)
+        await db_manager.db.orders.insert_one(order_doc)
+    except Exception:
+        for item in reserved:
+            await db_manager.db.products.update_one(
+                {"product_id": item["product_id"]},
+                {"$inc": {"stock": item["quantity"]}},
+            )
+        raise
     order_doc.pop("_id", None)
 
     user_name = current_user.get("name", "Valued Customer")
@@ -2151,14 +2158,19 @@ async def submit_utr_endpoint(
             detail="Order is not awaiting payment"
         )
 
-    await db_manager.db.orders.update_one(
-        {"order_id": data.order_id},
-        {"$set": {
-            "payment_ref": data.utr,
-            "status": "awaiting_verification",
-            "utr_submitted_at": now_iso(),
-        }}
+    utr = data.utr.strip().upper()
+    duplicate = await db_manager.db.orders.find_one(
+        {"payment_ref": utr, "order_id": {"$ne": data.order_id}}, {"_id": 1}
     )
+    if duplicate:
+        raise HTTPException(status_code=409, detail="This UTR has already been submitted")
+
+    result = await db_manager.db.orders.update_one(
+        {"order_id": data.order_id, "user_id": current_user["user_id"], "status": {"$in": ["awaiting_payment", "payment_failed"]}},
+        {"$set": {"payment_ref": utr, "status": "awaiting_verification", "utr_submitted_at": now_iso(), "updated_at": now_iso()}}
+    )
+    if result.modified_count != 1:
+        raise HTTPException(status_code=409, detail="Order payment status changed. Please refresh and try again.")
 
     logger.info(f"UTR submitted for order {data.order_id}")
     return {"ok": True, "order_id": data.order_id, "status": "awaiting_verification"}
@@ -2236,44 +2248,79 @@ async def admin_list_orders_endpoint(
         "skip": skip,
     }
 
+async def restore_order_stock_once(order: dict) -> None:
+    """Restore reserved stock once for a cancelled/rejected order."""
+    claim = await db_manager.db.orders.update_one(
+        {"order_id": order["order_id"], "stock_restored_at": {"$exists": False}},
+        {"$set": {"stock_restored_at": now_iso()}},
+    )
+    if claim.modified_count != 1:
+        return
+    try:
+        for item in order.get("items", []):
+            qty = int(item.get("quantity", 0))
+            if qty > 0:
+                await db_manager.db.products.update_one(
+                    {"product_id": item.get("product_id")},
+                    {"$inc": {"stock": qty}, "$set": {"updated_at": now_iso()}},
+                )
+    except Exception:
+        await db_manager.db.orders.update_one(
+            {"order_id": order["order_id"]},
+            {"$unset": {"stock_restored_at": ""}},
+        )
+        raise
+
+
 async def admin_update_order_status_endpoint(
     order_id: str = PathParam(..., regex=r'^ord_[a-f0-9]{12}$'),
     new_status: str = Form(..., alias="status"),
     admin: dict = Depends(get_current_admin_user)
 ):
-    """Update order status (admin only)."""
-    valid_statuses = [
-        "awaiting_payment", "awaiting_verification", "payment_failed",
-        "confirmed", "shipped", "delivered", "cancelled"
-    ]
+    """Update fulfillment status using safe state transitions."""
+    transitions = {
+        "awaiting_payment": {"awaiting_verification", "payment_failed", "cancelled"},
+        "awaiting_verification": {"confirmed", "payment_failed", "cancelled"},
+        "payment_failed": {"awaiting_payment", "awaiting_verification", "cancelled"},
+        "confirmed": {"shipped", "cancelled"},
+        "shipped": {"delivered"},
+        "delivered": set(),
+        "cancelled": set(),
+    }
+    if new_status not in transitions:
+        raise HTTPException(status_code=400, detail="Invalid order status")
 
-    if new_status not in valid_statuses:
-        raise HTTPException(
-            status_code=http_status.HTTP_400_BAD_REQUEST,
-            detail=f"Invalid status. Must be one of: {', '.join(valid_statuses)}"
-        )
+    order = await db_manager.db.orders.find_one({"order_id": order_id}, {"_id": 0})
+    if not order:
+        raise HTTPException(status_code=404, detail="Order not found")
 
-    result = await db_manager.db.orders.update_one(
-        {"order_id": order_id},
-        {"$set": {"status": new_status, "updated_at": now_iso()}}
-    )
+    current = order.get("status")
+    if new_status != current and new_status not in transitions.get(current, set()):
+        raise HTTPException(status_code=409, detail=f"Cannot change order from {current} to {new_status}")
 
-    if result.matched_count == 0:
-        raise HTTPException(
-            status_code=http_status.HTTP_404_NOT_FOUND,
-            detail="Order not found"
-        )
+    update = {"status": new_status, "updated_at": now_iso()}
+    if new_status == "confirmed" and not order.get("paid_at"):
+        update["paid_at"] = now_iso()
+    if new_status == "shipped":
+        update["shipped_at"] = now_iso()
+    if new_status == "delivered":
+        update["delivered_at"] = now_iso()
+    if new_status == "cancelled":
+        await restore_order_stock_once(order)
+        update["cancelled_at"] = now_iso()
+        update["cancelled_by"] = admin["user_id"]
+
+    await db_manager.db.orders.update_one({"order_id": order_id}, {"$set": update})
 
     if new_status == "delivered":
-        order = await db_manager.db.orders.find_one({"order_id": order_id}, {"_id": 0})
-        if order:
-            user = await db_manager.db.users.find_one({"user_id": order["user_id"]}, {"_id": 0})
-            user_name = user.get("name", "Valued Customer") if user else "Valued Customer"
-            asyncio.create_task(
-                asyncio.to_thread(send_delivery_email, order["user_email"], user_name, order)
-            )
+        user = await db_manager.db.users.find_one({"user_id": order["user_id"]}, {"_id": 0})
+        asyncio.create_task(asyncio.to_thread(
+            send_delivery_email, order["user_email"],
+            user.get("name", "Valued Customer") if user else "Valued Customer",
+            {**order, **update},
+        ))
 
-    logger.info(f"Admin {admin['user_id']} updated order {order_id} status to {new_status}")
+    logger.info("Admin %s changed order %s: %s -> %s", admin["user_id"], order_id, current, new_status)
     return {"ok": True, "status": new_status}
 
 async def admin_verify_payment_endpoint(
@@ -2282,6 +2329,8 @@ async def admin_verify_payment_endpoint(
     admin: dict = Depends(get_current_admin_user)
 ):
     """Verify or reject payment (admin only)."""
+    if data is None:
+        raise HTTPException(status_code=422, detail="Verification action is required")
     order = await db_manager.db.orders.find_one({"order_id": order_id}, {"_id": 0})
 
     if not order:
@@ -2289,6 +2338,9 @@ async def admin_verify_payment_endpoint(
             status_code=http_status.HTTP_404_NOT_FOUND,
             detail="Order not found"
         )
+
+    if order.get("status") != "awaiting_verification":
+        raise HTTPException(status_code=400, detail="Order is not awaiting payment verification")
 
     update_data = {"updated_at": now_iso()}
 
@@ -2299,6 +2351,7 @@ async def admin_verify_payment_endpoint(
     else:
         update_data["status"] = "payment_failed"
         update_data["rejected_by"] = admin["user_id"]
+        await restore_order_stock_once(order)
 
     if data.notes:
         update_data["payment_notes"] = data.notes
@@ -2474,8 +2527,8 @@ async def health_check_endpoint():
     try:
         await db_manager.db.command("ping")
         db_status = "healthy"
-    except Exception as e:
-        db_status = f"unhealthy: {str(e)}"
+    except Exception:
+        db_status = "unhealthy"
 
     return {
         "status": "ok",
@@ -2502,19 +2555,8 @@ async def readiness_check_endpoint():
         )
 
 async def metrics_endpoint():
-    """Basic metrics endpoint."""
-    product_count = await db_manager.db.products.count_documents({})
-    order_count = await db_manager.db.orders.count_documents({})
-    user_count = await db_manager.db.users.count_documents({})
-
-    return {
-        "metrics": {
-            "products": product_count,
-            "orders": order_count,
-            "users": user_count,
-        },
-        "timestamp": now_iso(),
-    }
+    """Minimal public metrics; detailed business counts are admin-only."""
+    return {"status": "ok", "service": Settings.APP_NAME, "version": Settings.APP_VERSION, "timestamp": now_iso()}
 
 # ============================================================================
 # FASTAPI APPLICATION
@@ -2587,7 +2629,7 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=Settings.CORS_ORIGINS,
-    allow_origin_regex=r"https?://.*\.vercel\.app",
+    allow_origin_regex=r"https://(?:shopbyfbo|shopbyfbo-repo)(?:-[a-z0-9-]+)?\.vercel\.app",
     allow_credentials=True,
     allow_methods=["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
     allow_headers=[
@@ -2611,12 +2653,7 @@ app.add_middleware(
 
 app.add_middleware(
     TrustedHostMiddleware,
-    allowed_hosts=[
-        "localhost",
-        "127.0.0.1",
-        "*.vercel.app",
-        "*.onrender.com",
-    ]
+    allowed_hosts=[h.strip() for h in os.getenv("ALLOWED_HOSTS", "localhost,127.0.0.1,*.vercel.app,*.onrender.com").split(",") if h.strip()]
 )
 
 app.add_middleware(SecurityHeadersMiddleware)
