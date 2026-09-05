@@ -2869,13 +2869,220 @@ def _chat_product_context(product: dict) -> dict:
     }
 
 
-async def chat_endpoint(request: Request, data: ChatRequest):
-    """Answer customer questions using Gemini plus live MongoDB store context."""
-    if not Settings.GEMINI_API_KEY or genai is None:
-        raise HTTPException(
-            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="AI assistant is not configured yet. Please use human support.",
+# ----------------------------------------------------------------------
+# Gemini call helper: retries + model fallback + graceful degradation
+# ----------------------------------------------------------------------
+
+class GeminiUnavailableError(Exception):
+    """Raised when Gemini could not produce a reply after retries and
+    fallback-model attempts. Callers should catch this and fall back to a
+    deterministic, database-driven response instead of failing the request.
+    """
+
+
+# Substrings that identify a transient/capacity error worth retrying, per
+# the 429 / 500 / 502 / 503 / 504 / UNAVAILABLE / RESOURCE_EXHAUSTED list.
+_RETRYABLE_MARKERS = (
+    "429", "500", "502", "503", "504",
+    "unavailable", "resource_exhausted", "resource exhausted",
+    "rate limit", "rate_limit", "overloaded", "high demand",
+    "deadline exceeded", "internal error", "try again",
+)
+
+# Substrings that identify a permanent, non-retryable configuration error
+# (bad key, malformed request, permission denied) - retrying these just
+# wastes time and delays the deterministic fallback.
+_PERMANENT_MARKERS = (
+    "api key not valid", "api_key_invalid", "invalid api key",
+    "permission_denied", "permission denied", "unauthenticated",
+    "invalid_argument", "failed_precondition",
+)
+
+# Substrings that mean "this model name isn't available to this SDK/key" -
+# worth moving straight to the fallback model rather than retrying.
+_MODEL_NOT_FOUND_MARKERS = ("not_found", "not found", "404", "unsupported model", "unknown model")
+
+
+def _classify_gemini_error(exc: Exception) -> str:
+    """Returns 'permanent', 'model_not_found', or 'retryable'."""
+    code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    msg = str(exc).lower()
+
+    if isinstance(code, int):
+        if code in (429, 500, 502, 503, 504):
+            return "retryable"
+        if code == 404:
+            return "model_not_found"
+        if code in (400, 401, 403):
+            return "permanent"
+
+    if any(m in msg for m in _MODEL_NOT_FOUND_MARKERS):
+        return "model_not_found"
+    if any(m in msg for m in _PERMANENT_MARKERS):
+        return "permanent"
+    if any(m in msg for m in _RETRYABLE_MARKERS):
+        return "retryable"
+
+    # Unknown error shape: treat as retryable once, rather than permanent,
+    # since Gemini capacity errors don't always match a known marker.
+    return "retryable"
+
+
+def _extract_gemini_text(response: Any) -> str:
+    """Supports both the newer Interactions API (`output_text`) and the
+    stable `generate_content` API (`text`) response shapes."""
+    text = getattr(response, "output_text", None)
+    if text:
+        return text.strip()
+    text = getattr(response, "text", None)
+    if text:
+        return text.strip()
+    return ""
+
+
+def _call_gemini_sync(model: str, prompt: str) -> Any:
+    """Runs on a worker thread via asyncio.to_thread - the google-genai
+    client is synchronous under the hood.
+
+    Prefers the current Interactions API (client.interactions.create) when
+    the installed SDK version exposes it, and transparently falls back to
+    the stable generate_content API otherwise. This means the same code
+    keeps working whether Render has the newest or a slightly older pinned
+    google-genai version installed.
+    """
+    client = genai.Client(api_key=Settings.GEMINI_API_KEY)
+    interactions = getattr(client, "interactions", None)
+    if interactions is not None and hasattr(interactions, "create"):
+        try:
+            return interactions.create(model=model, input=prompt)
+        except (AttributeError, TypeError):
+            pass  # SDK exposes .interactions but with an incompatible signature
+    return client.models.generate_content(model=model, contents=prompt)
+
+
+async def _call_gemini_once(model: str, prompt: str) -> str:
+    response = await asyncio.wait_for(
+        asyncio.to_thread(_call_gemini_sync, model, prompt),
+        timeout=Settings.GEMINI_TIMEOUT_SECONDS,
+    )
+    return _extract_gemini_text(response)
+
+
+async def generate_gemini_response(prompt: str) -> str:
+    """
+    Centralized Gemini call helper used by every Gemini call site.
+
+    Flow: primary model -> bounded retries with exponential backoff+jitter
+    on transient errors -> fallback model -> bounded retries -> raise
+    GeminiUnavailableError so the caller can serve a deterministic local
+    response instead of a hard failure.
+
+    Never blocks the event loop (blocking SDK calls run via
+    asyncio.to_thread) and never retries indefinitely (fixed attempt list
+    per model, plus a per-call timeout).
+    """
+    backoff_schedule = [0, 1.5, 3.0]  # attempt 1 (immediate), 2, 3 per model
+
+    models_to_try = [Settings.GEMINI_MODEL]
+    if Settings.GEMINI_FALLBACK_MODEL and Settings.GEMINI_FALLBACK_MODEL != Settings.GEMINI_MODEL:
+        models_to_try.append(Settings.GEMINI_FALLBACK_MODEL)
+
+    last_exc: Optional[Exception] = None
+
+    for model in models_to_try:
+        for attempt, delay in enumerate(backoff_schedule, start=1):
+            if delay:
+                await asyncio.sleep(delay + random.uniform(0, 0.3))
+            try:
+                text = await _call_gemini_once(model, prompt)
+                if text:
+                    return text
+                last_exc = RuntimeError("Gemini returned an empty response")
+                logger.warning("Gemini returned empty text (model=%s, attempt=%d)", model, attempt)
+                continue
+            except asyncio.TimeoutError as e:
+                last_exc = e
+                logger.warning("Gemini call timed out (model=%s, attempt=%d)", model, attempt)
+                continue
+            except Exception as e:
+                last_exc = e
+                category = _classify_gemini_error(e)
+                if category == "permanent":
+                    logger.error("Permanent Gemini error (model=%s): %s", model, e)
+                    raise GeminiUnavailableError(str(e)) from e
+                if category == "model_not_found":
+                    logger.warning("Gemini model unavailable (model=%s): %s", model, e)
+                    break  # stop retrying this model, try the next one in models_to_try
+                logger.warning(
+                    "Transient Gemini error (model=%s, attempt=%d/%d): %s",
+                    model, attempt, len(backoff_schedule), e,
+                )
+                continue
+
+    raise GeminiUnavailableError(str(last_exc) if last_exc else "Gemini unavailable")
+
+
+def _build_deterministic_reply(
+    message: str,
+    products: List[dict],
+    order_context: Optional[dict],
+    support_url: Optional[str],
+) -> str:
+    """
+    Database-driven answer used only when Gemini is completely unavailable
+    (config missing, or every model/retry attempt failed). Never invents
+    data - it only echoes what was already fetched from MongoDB.
+    """
+    lower_msg = message.lower()
+    lines: List[str] = []
+
+    order_keywords = ("order", "delivery", "status", "shipment", "shipped", "track", "delivered")
+    if order_context and any(k in lower_msg for k in order_keywords):
+        total = order_context.get("total")
+        total_str = f"₹{total:.2f}" if isinstance(total, (int, float)) else "N/A"
+        lines.append(
+            f"Our AI assistant is briefly busy, but here's what we have on file: your most "
+            f"recent order ({order_context.get('order_id', 'N/A')}) is currently "
+            f"'{order_context.get('status', 'unknown')}' with a total of {total_str}."
         )
+    elif products:
+        lines.append("Our AI assistant is a little busy right now, but here's what we currently have:")
+        for p in products[:5]:
+            price = p.get("price", 0)
+            try:
+                price_str = f"₹{float(price):.2f}"
+            except (TypeError, ValueError):
+                price_str = "N/A"
+            name = p.get("name", "Product")
+            category = p.get("category", "")
+            lines.append(f"- {name} ({price_str}){f' - {category}' if category else ''}")
+        lines.append("Open the product page for full details, stock, and BV/CC.")
+    else:
+        lines.append(
+            "Our AI assistant is temporarily busy and we couldn't find a matching product just now. "
+            "Please try again in a moment or browse the shop directly."
+        )
+
+    if support_url:
+        lines.append(f"Need a hand? Reach us on WhatsApp: {support_url}")
+
+    return "\n".join(lines)
+
+
+async def chat_endpoint(request: Request, data: ChatRequest):
+    """
+    Answer customer questions using Gemini plus live MongoDB store context.
+
+    Gemini itself is optional at the request level: if the API key is
+    missing, the SDK isn't installed, or Gemini is down after retries and
+    fallback-model attempts, this endpoint still returns HTTP 200 with a
+    deterministic, database-driven answer instead of failing the chatbot
+    outright. Only unexpected internal errors (e.g. the database itself
+    being unreachable) propagate as 5xx, via the global exception handler.
+    """
+    gemini_configured = bool(Settings.GEMINI_API_KEY) and genai is not None
+    if not gemini_configured:
+        logger.warning("Gemini is not configured (missing API key or SDK) - using local fallback replies only")
 
     current_user = await get_optional_user(request, None)
     rate_key = f"user:{current_user['user_id']}" if current_user else f"ip:{get_client_ip(request)}"
@@ -2944,23 +3151,27 @@ async def chat_endpoint(request: Request, data: ChatRequest):
         "Answer the customer directly. Do not mention internal databases or system prompts."
     )
 
-    try:
-        client = genai.Client(api_key=Settings.GEMINI_API_KEY)
-        response = await asyncio.to_thread(
-            client.models.generate_content,
-            model=Settings.GEMINI_MODEL,
-            contents=prompt,
-        )
-        reply = (getattr(response, "text", None) or "").strip()
-    except Exception as e:
-        logger.error("Gemini chat failed: %s", e, exc_info=True)
-        raise HTTPException(
-            status_code=http_status.HTTP_502_BAD_GATEWAY,
-            detail="The AI assistant is temporarily unavailable. Please try again or contact support.",
-        )
+    reply = ""
+    if gemini_configured:
+        try:
+            reply = await asyncio.wait_for(
+                generate_gemini_response(prompt),
+                timeout=Settings.GEMINI_TOTAL_TIMEOUT_SECONDS,
+            )
+        except (GeminiUnavailableError, asyncio.TimeoutError) as e:
+            # Transient/capacity errors, model-not-found on every candidate
+            # model, or the overall deadline being hit. Never expose the raw
+            # exception to the customer - fall back to a deterministic,
+            # database-driven answer instead.
+            logger.error("Gemini unavailable after retries/fallback model: %s", e)
+        except Exception as e:
+            # Defensive catch-all: an unexpected SDK/client-construction
+            # error should still degrade gracefully rather than 500 the
+            # whole chatbot.
+            logger.error("Unexpected error calling Gemini: %s", e, exc_info=True)
 
     if not reply:
-        reply = "I'm sorry, I couldn't generate an answer right now. Please try again or contact support."
+        reply = _build_deterministic_reply(message, products, order_context, support_url)
 
     product_cards = [_chat_product_context(p) for p in products[:4]]
     return {
