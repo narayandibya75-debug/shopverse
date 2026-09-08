@@ -161,6 +161,10 @@ class Settings:
     CHAT_RATE_WINDOW_SECONDS: int = int(os.getenv("CHAT_RATE_WINDOW_SECONDS", "60"))
     WHATSAPP_NUMBER: str = os.getenv("WHATSAPP_NUMBER", "")
 
+        # Keep-alive (prevents Render free-tier spin-down)
+    KEEP_ALIVE_ENABLED: bool = os.getenv("KEEP_ALIVE_ENABLED", "True").lower() == "true"
+    # Must be comfortably under Render's ~15-minute inactivity timeout
+    KEEP_ALIVE_INTERVAL_SECONDS: int = int(os.getenv("KEEP_ALIVE_INTERVAL_SECONDS", "600"))
     # Payment
     MERCHANT_UPI_ID: str = os.getenv("MERCHANT_UPI_ID", "")
     MERCHANT_NAME: str = os.getenv("MERCHANT_NAME", "FBO Store")
@@ -2539,7 +2543,6 @@ async def admin_get_analytics_endpoint(admin: dict = Depends(get_current_admin_u
         "daily_visits": daily,
         "top_clicks": top_clicks,
     }
-
 # ============================================================================
 # API ROUTES - HEALTH
 # ============================================================================
@@ -2581,22 +2584,64 @@ async def metrics_endpoint():
     return {"status": "ok", "service": Settings.APP_NAME, "version": Settings.APP_VERSION, "timestamp": now_iso()}
 
 # ============================================================================
+# KEEP-ALIVE (prevents Render free-tier spin-down)
+# ============================================================================
+
+_keep_alive_task: Optional[asyncio.Task] = None
+
+async def keep_alive_loop():
+    """
+    Periodically GETs this service's own public /health endpoint so Render
+    sees inbound traffic and never spins the instance down. Runs for the
+    lifetime of the process as a background asyncio task.
+    """
+    if not Settings.RENDER_URL:
+        logger.warning("KEEP_ALIVE: RENDER_URL not set, keep-alive disabled")
+        return
+
+    url = f"{Settings.RENDER_URL.rstrip('/')}/health"
+    await asyncio.sleep(30)  # let the server finish booting first
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        while True:
+            try:
+                response = await client.get(url)
+                logger.info(f"KEEP_ALIVE: pinged {url} -> {response.status_code}")
+            except Exception as e:
+                logger.warning(f"KEEP_ALIVE: ping failed: {e}")
+
+            await asyncio.sleep(Settings.KEEP_ALIVE_INTERVAL_SECONDS)
+
+# ============================================================================
 # FASTAPI APPLICATION
 # ============================================================================
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler."""
+    global _keep_alive_task
     logger.info(f"Starting {Settings.APP_NAME} v{Settings.APP_VERSION}")
     await db_manager.connect()
     await seed_initial_data()
+
+    if Settings.KEEP_ALIVE_ENABLED and Settings.ENVIRONMENT == "production":
+        _keep_alive_task = asyncio.create_task(keep_alive_loop())
+        logger.info(f"KEEP_ALIVE: started, interval={Settings.KEEP_ALIVE_INTERVAL_SECONDS}s")
+
     logger.info("Application started successfully")
 
     yield
 
     logger.info("Shutting down application...")
+    if _keep_alive_task:
+        _keep_alive_task.cancel()
+        try:
+            await _keep_alive_task
+        except asyncio.CancelledError:
+            pass
     await db_manager.close()
     logger.info("Application shutdown complete")
+
 
 def _mongo_safe(value):
     """
