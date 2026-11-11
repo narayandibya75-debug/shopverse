@@ -47,6 +47,7 @@ from pydantic import (
 from pydantic.fields import FieldInfo
 from motor.motor_asyncio import AsyncIOMotorClient, AsyncIOMotorDatabase
 from bson import ObjectId
+from pymongo.errors import DuplicateKeyError, PyMongoError
 from fastapi import (
     FastAPI,
     Request,
@@ -118,6 +119,16 @@ class Settings:
     REFRESH_TOKEN_EXPIRE_DAYS: int = int(os.getenv("REFRESH_TOKEN_EXPIRE_DAYS", "7"))
     JWT_ISSUER: str = os.getenv("JWT_ISSUER", "shopverse-fbo")
     JWT_AUDIENCE: str = os.getenv("JWT_AUDIENCE", "shopverse-frontend")
+    # Clock-skew tolerance (seconds) applied to exp / nbf / iat checks. Without
+    # it a token whose "nbf" is a fraction of a second in the future (host
+    # clock drift, load-balanced instances) is rejected as "Invalid token",
+    # which the frontend interprets as "session over" and logs the user out.
+    JWT_LEEWAY_SECONDS: int = int(os.getenv("JWT_LEEWAY_SECONDS", "10"))
+    # Refresh tokens are single-use (rotated). If the *same* refresh token is
+    # presented again within this window it is treated as a retry of a request
+    # whose response was lost (Render cold start, flaky mobile network, two
+    # tabs refreshing at once) and NOT as token theft.
+    REFRESH_REUSE_GRACE_SECONDS: int = int(os.getenv("REFRESH_REUSE_GRACE_SECONDS", "60"))
 
     # Google OAuth
     GOOGLE_CLIENT_ID: str = os.getenv("GOOGLE_CLIENT_ID", "")
@@ -523,6 +534,7 @@ class JWTManager:
                 algorithms=[self.algorithm],
                 audience=self.audience,
                 issuer=self.issuer,
+                leeway=Settings.JWT_LEEWAY_SECONDS,
                 options={"require": ["exp", "iat", "nbf", "jti"]}
             )
 
@@ -541,27 +553,121 @@ class JWTManager:
             logger.error(f"Token decode error: {e}")
             raise HTTPException(status_code=401, detail="Invalid token")
 
-    async def revoke_token(self, jti: str, expires_at: int) -> bool:
+    async def revoke_token(self, jti: str, expires_at: int, reason: str = "logout") -> bool:
+        """Blacklist a token. Idempotent: revoking an already-revoked jti is fine."""
         try:
             await db_manager.db.token_blacklist.insert_one({
                 "jti": jti,
                 "expires_at": datetime.fromtimestamp(expires_at, tz=timezone.utc),
                 "revoked_at": datetime.now(timezone.utc),
+                "reason": reason,
             })
+            return True
+        except DuplicateKeyError:
             return True
         except Exception as e:
             logger.error(f"Token revocation failed: {e}")
             return False
 
     async def is_token_revoked(self, jti: str) -> bool:
+        """
+        True if the jti is blacklisted.
+
+        A database failure must NOT be reported as "not revoked" (that would
+        silently accept logged-out tokens) and must NOT be reported as an auth
+        failure either (the client would wipe a perfectly good session). It is
+        a 503: "try again", not "log in again".
+        """
         try:
             result = await db_manager.db.token_blacklist.find_one({"jti": jti})
             return result is not None
-        except Exception:
+        except PyMongoError as e:
+            logger.error(f"Blacklist lookup failed: {e}")
+            raise HTTPException(status_code=503, detail="Authentication service temporarily unavailable")
+
+    async def rotate_refresh_token(self, jti: str, expires_at: int) -> bool:
+        """
+        Atomically consume a refresh token. Returns True when the caller may be
+        issued a new token pair, False when the token is genuinely dead.
+
+        The unique index on `jti` makes the insert the atomic "claim": exactly
+        one concurrent request wins it. Any loser (second tab, or a retry after
+        a lost response) is still allowed through if the token was rotated
+        moments ago, but a token revoked by logout, or rotated long ago, is
+        rejected.
+        """
+        coll = db_manager.db.token_blacklist
+        now = datetime.now(timezone.utc)
+        try:
+            await coll.insert_one({
+                "jti": jti,
+                "expires_at": datetime.fromtimestamp(expires_at, tz=timezone.utc),
+                "revoked_at": now,
+                "reason": "rotated",
+            })
+            return True
+        except DuplicateKeyError:
+            doc = await coll.find_one({"jti": jti})
+        except PyMongoError as e:
+            logger.error(f"Refresh rotation failed: {e}")
+            raise HTTPException(status_code=503, detail="Authentication service temporarily unavailable")
+
+        if not doc or doc.get("reason") != "rotated":
             return False
+        revoked_at = doc.get("revoked_at")
+        if revoked_at is None:
+            return False
+        if revoked_at.tzinfo is None:  # pymongo returns naive UTC by default
+            revoked_at = revoked_at.replace(tzinfo=timezone.utc)
+        age = (now - revoked_at).total_seconds()
+        if age <= Settings.REFRESH_REUSE_GRACE_SECONDS:
+            logger.info(f"Refresh token reused {age:.1f}s after rotation - allowing (grace window)")
+            return True
+        return False
 
 password_hasher = PasswordHasher()
 jwt_manager = JWTManager()
+
+# ----------------------------------------------------------------------------
+# Refresh-token cookie helpers
+# ----------------------------------------------------------------------------
+# The cookie path is the whole /auth prefix (not just /auth/refresh) so the
+# browser also sends it to /auth/logout, which is what lets logout actually
+# revoke the refresh token. LEGACY_REFRESH_COOKIE_PATH is where earlier builds
+# stored it; it is cleared on logout/refresh so stale cookies cannot linger.
+REFRESH_COOKIE_NAME = "refresh_token"
+
+def _refresh_cookie_path() -> str:
+    return f"{Settings.API_PREFIX}/auth"
+
+def _legacy_refresh_cookie_path() -> str:
+    return f"{Settings.API_PREFIX}/auth/refresh"
+
+def _cookie_flags() -> dict:
+    if Settings.SECURE_COOKIES:
+        # Frontend (Vercel) and backend (Render) are on different sites.
+        return {"secure": True, "samesite": "none"}
+    # Plain-HTTP local development: Secure cookies would be dropped entirely.
+    return {"secure": False, "samesite": "lax"}
+
+def set_refresh_cookie(response: JSONResponse, token: str) -> None:
+    response.set_cookie(
+        key=REFRESH_COOKIE_NAME,
+        value=token,
+        httponly=True,
+        max_age=Settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
+        path=_refresh_cookie_path(),
+        **_cookie_flags(),
+    )
+
+def clear_refresh_cookie(response: JSONResponse) -> None:
+    for path in {_refresh_cookie_path(), _legacy_refresh_cookie_path()}:
+        response.delete_cookie(
+            key=REFRESH_COOKIE_NAME,
+            path=path,
+            httponly=True,
+            **_cookie_flags(),
+        )
 
 # ============================================================================
 # RATE LIMITING
@@ -953,6 +1059,14 @@ async def get_current_user(
 
     except HTTPException:
         raise
+    except PyMongoError as e:
+        # Database hiccup (cold start, failover, network blip). The token is
+        # fine; answering 401 here makes the client discard a valid session.
+        logger.error(f"Authentication DB error: {e}")
+        raise HTTPException(
+            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication service temporarily unavailable"
+        )
     except Exception as e:
         logger.error(f"Authentication error: {e}")
         raise HTTPException(
@@ -1292,16 +1406,7 @@ async def auth_register_endpoint(request: Request, data: RegisterRequest):
     response = create_auth_response(user, access_token, refresh_token)
 
     response_obj = JSONResponse(content=response)
-    if Settings.SECURE_COOKIES:
-        response_obj.set_cookie(
-            key="refresh_token",
-            value=refresh_token,
-            httponly=True,
-            secure=True,
-            samesite="none",  # cross-site cookie: frontend and backend are on different domains
-            max_age=Settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
-            path=f"{Settings.API_PREFIX}/auth/refresh"
-        )
+    set_refresh_cookie(response_obj, refresh_token)
 
     logger.info(f"User registered: {email}")
     return response_obj
@@ -1355,16 +1460,7 @@ async def auth_login_endpoint(request: Request, data: LoginRequest):
     response = create_auth_response(user, access_token, refresh_token)
 
     response_obj = JSONResponse(content=response)
-    if Settings.SECURE_COOKIES:
-        response_obj.set_cookie(
-            key="refresh_token",
-            value=refresh_token,
-            httponly=True,
-            secure=True,
-            samesite="none",  # cross-site cookie: frontend and backend are on different domains
-            max_age=Settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
-            path=f"{Settings.API_PREFIX}/auth/refresh"
-        )
+    set_refresh_cookie(response_obj, refresh_token)
 
     logger.info(f"User logged in: {email}")
     return response_obj
@@ -1489,16 +1585,7 @@ async def auth_google_login_endpoint(request: Request):
     response = create_auth_response(user, access_token, refresh_token)
 
     response_obj = JSONResponse(content=response)
-    if Settings.SECURE_COOKIES:
-        response_obj.set_cookie(
-            key="refresh_token",
-            value=refresh_token,
-            httponly=True,
-            secure=True,
-            samesite="none",  # cross-site cookie: frontend and backend are on different domains
-            max_age=Settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
-            path=f"{Settings.API_PREFIX}/auth/refresh"
-        )
+    set_refresh_cookie(response_obj, refresh_token)
 
     logger.info(f"Google login successful: {email}")
     return response_obj
@@ -1508,13 +1595,20 @@ async def auth_google_login_endpoint(request: Request):
 # ============================================================================
 
 async def auth_refresh_endpoint(request: Request):
-    """Refresh access token."""
-    refresh_token = request.cookies.get("refresh_token")
+    """
+    Exchange a refresh token for a new access/refresh pair.
+
+    Only a *dead* session answers 401 (missing, malformed, expired, logged out,
+    reused outside the grace window, user deleted). Infrastructure problems
+    answer 503 so clients retry instead of logging the user out.
+    """
+    refresh_token = request.cookies.get(REFRESH_COOKIE_NAME)
 
     if not refresh_token:
         try:
             body = await request.json()
-            refresh_token = body.get("refresh_token")
+            if isinstance(body, dict):
+                refresh_token = body.get("refresh_token")
         except Exception:
             pass
 
@@ -1527,23 +1621,22 @@ async def auth_refresh_endpoint(request: Request):
     try:
         payload = jwt_manager.decode_token(refresh_token, verify_type="refresh")
 
-        if await jwt_manager.is_token_revoked(payload["jti"]):
-            raise HTTPException(
-                status_code=http_status.HTTP_401_UNAUTHORIZED,
-                detail="Token revoked"
-            )
-
-        await jwt_manager.revoke_token(payload["jti"], payload["exp"])
-
+        # Look the user up BEFORE consuming the token: if the lookup fails the
+        # client can simply retry with the same, still-valid refresh token.
         user = await db_manager.db.users.find_one(
             {"user_id": payload["sub"]},
             {"_id": 0, "password_hash": 0}
         )
-
         if not user:
             raise HTTPException(
                 status_code=http_status.HTTP_401_UNAUTHORIZED,
                 detail="User not found"
+            )
+
+        if not await jwt_manager.rotate_refresh_token(payload["jti"], payload["exp"]):
+            raise HTTPException(
+                status_code=http_status.HTTP_401_UNAUTHORIZED,
+                detail="Token revoked"
             )
 
         access_token = jwt_manager.create_access_token(
@@ -1556,21 +1649,25 @@ async def auth_refresh_endpoint(request: Request):
         response = create_auth_response(user, access_token, new_refresh_token)
 
         response_obj = JSONResponse(content=response)
-        if Settings.SECURE_COOKIES:
-            response_obj.set_cookie(
-                key="refresh_token",
-                value=new_refresh_token,
-                httponly=True,
-                secure=True,
-                samesite="none",  # cross-site cookie: frontend and backend are on different domains
-                max_age=Settings.REFRESH_TOKEN_EXPIRE_DAYS * 86400,
-                path=f"{Settings.API_PREFIX}/auth/refresh"
-            )
+        set_refresh_cookie(response_obj, new_refresh_token)
+        # Drop any cookie an older build stored under the narrower path.
+        response_obj.delete_cookie(
+            key=REFRESH_COOKIE_NAME,
+            path=_legacy_refresh_cookie_path(),
+            httponly=True,
+            **_cookie_flags(),
+        )
 
         return response_obj
 
     except HTTPException:
         raise
+    except PyMongoError as e:
+        logger.error(f"Refresh DB error: {e}")
+        raise HTTPException(
+            status_code=http_status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication service temporarily unavailable"
+        )
     except Exception as e:
         logger.error(f"Refresh error: {e}")
         raise HTTPException(
@@ -1578,27 +1675,49 @@ async def auth_refresh_endpoint(request: Request):
             detail="Invalid refresh token"
         )
 
+def _decode_for_revocation(token: str) -> Optional[Dict[str, Any]]:
+    """
+    Decode a token only to learn its jti/exp so it can be blacklisted. Expiry is
+    deliberately not enforced (an expired token is harmless, and failing here
+    would just skip the revoke); signature, issuer and audience still are.
+    """
+    try:
+        return jwt.decode(
+            token,
+            Settings.JWT_SECRET,
+            algorithms=[Settings.JWT_ALGORITHM],
+            audience=Settings.JWT_AUDIENCE,
+            issuer=Settings.JWT_ISSUER,
+            options={"verify_exp": False, "require": ["exp", "jti"]},
+        )
+    except Exception:
+        return None
+
 async def auth_logout_endpoint(request: Request):
-    """Logout user and revoke tokens."""
-    token = request.headers.get("Authorization", "").replace("Bearer ", "")
-    if token:
+    """Logout user: revoke access + refresh tokens and clear the cookie."""
+    access = request.headers.get("Authorization", "").replace("Bearer ", "").strip()
+    if not access:
+        access = request.cookies.get("access_token", "")
+
+    refresh = request.cookies.get(REFRESH_COOKIE_NAME)
+    if not refresh:
         try:
-            payload = jwt_manager.decode_token(token)
-            await jwt_manager.revoke_token(payload["jti"], payload["exp"])
+            body = await request.json()
+            if isinstance(body, dict):
+                refresh = body.get("refresh_token")
         except Exception:
             pass
 
-    refresh_token = request.cookies.get("refresh_token")
-    if refresh_token:
-        try:
-            payload = jwt_manager.decode_token(refresh_token)
-            await jwt_manager.revoke_token(payload["jti"], payload["exp"])
-        except Exception:
-            pass
+    for token in (access, refresh):
+        if not token:
+            continue
+        payload = _decode_for_revocation(token)
+        if payload:
+            await jwt_manager.revoke_token(payload["jti"], payload["exp"], reason="logout")
 
     response = JSONResponse(content={"ok": True, "message": "Logged out successfully"})
     response.delete_cookie("access_token", path="/")
-    response.delete_cookie("refresh_token", path=f"{Settings.API_PREFIX}/auth/refresh")
+    clear_refresh_cookie(response)
 
     logger.info(f"User logged out from {get_client_ip(request)}")
     return response
